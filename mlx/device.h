@@ -14,10 +14,12 @@ struct MLX_API Device {
   enum class DeviceType {
     cpu,
     gpu,
+    ane,
   };
 
   static constexpr DeviceType cpu = DeviceType::cpu;
   static constexpr DeviceType gpu = DeviceType::gpu;
+  static constexpr DeviceType ane = DeviceType::ane;
 
   Device(DeviceType type, int index = 0) : type(type), index(index) {}
 

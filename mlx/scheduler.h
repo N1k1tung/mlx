@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include "mlx/api.h"
+#include "mlx/backend/ane/eval.h"
 #include "mlx/backend/gpu/eval.h"
 #include "mlx/device.h"
 #include "mlx/stream.h"
@@ -70,6 +71,9 @@ class Scheduler {
     if (is_available(Device::gpu)) {
       default_streams_.insert({Device::gpu, new_stream(Device::gpu)});
     }
+    if (is_available(Device::ane)) {
+      default_streams_.insert({Device::ane, new_stream(Device::ane)});
+    }
     default_streams_.insert({Device::cpu, new_stream(Device::cpu)});
   }
 
@@ -84,6 +88,11 @@ class Scheduler {
     if (d == Device::gpu) {
       threads_.push_back(nullptr);
       gpu::new_stream(streams_.back());
+    } else if (d == Device::ane) {
+      // Keep a CPU worker thread for ANE streams so CPU-side async tasks
+      // (e.g. I/O waits) can be enqueued safely on the same logical stream.
+      threads_.push_back(new StreamThread{});
+      ane::new_stream(streams_.back());
     } else {
       threads_.push_back(new StreamThread{});
     }

@@ -10,7 +10,7 @@
 namespace mlx::core::gpu {
 
 void new_stream(Stream stream) {
-  if (stream.device == mlx::core::Device::gpu) {
+  if (stream.device != mlx::core::Device::cpu) {
     metal::device(stream.device).new_queue(stream.index);
   }
 }

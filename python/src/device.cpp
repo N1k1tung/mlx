@@ -20,6 +20,7 @@ void init_device(nb::module_& m) {
   nb::enum_<mx::Device::DeviceType>(m, "DeviceType")
       .value("cpu", mx::Device::DeviceType::cpu)
       .value("gpu", mx::Device::DeviceType::gpu)
+      .value("ane", mx::Device::DeviceType::ane)
       .export_values()
       .def(
           "__eq__",
@@ -73,7 +74,7 @@ void init_device(nb::module_& m) {
       Get the number of available devices for the given device type.
 
       Args:
-          device_type (DeviceType): The type of device to query (cpu or gpu).
+          device_type (DeviceType): The type of device to query (cpu, gpu, or ane).
 
       Returns:
           int: Number of devices.

@@ -3409,9 +3409,9 @@ array scatter(
   }
 
   // TODO, remove when scatter supports 64-bit outputs
-  if (to_stream(s).device == Device::gpu && size_of(a.dtype()) == 8) {
+  if (to_stream(s).device != Device::cpu && size_of(a.dtype()) == 8) {
     std::ostringstream msg;
-    msg << "[scatter] GPU scatter does not yet support " << a.dtype()
+    msg << "[scatter] Accelerator scatter does not yet support " << a.dtype()
         << " for the input or updates.";
     throw std::invalid_argument(msg.str());
   }
@@ -4590,7 +4590,7 @@ std::vector<array> fp_quantize(
     return {std::move(wq), std::move(scales)};
   };
 
-  if (s.device == Device::gpu) {
+  if (s.device != Device::cpu) {
     auto wq_shape = w.shape();
     wq_shape.back() = w.shape(-1) * bits / 32;
     auto sshape = w.shape();
@@ -4725,7 +4725,7 @@ array affine_dequantize(
     return {w};
   };
 
-  if (s.device == Device::gpu) {
+  if (s.device != Device::cpu) {
     auto out_shape = w.shape();
     out_shape.back() = out_size;
     return array(
@@ -4838,7 +4838,7 @@ array fp_dequantize(
     }
     return {reshape(multiply(out, scales, s), wshape, s)};
   };
-  if (s.device == Device::gpu) {
+  if (s.device != Device::cpu) {
     auto out_shape = w.shape();
     out_shape.back() = out_size;
     return array(

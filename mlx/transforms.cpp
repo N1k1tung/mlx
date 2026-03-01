@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "mlx/backend/ane/eval.h"
 #include "mlx/backend/cpu/eval.h"
 #include "mlx/backend/gpu/eval.h"
 #include "mlx/fence.h"
@@ -235,6 +236,8 @@ array eval_impl(std::vector<array> outputs, bool async) {
 
     if (arr.primitive().device() == Device::gpu) {
       gpu::eval(arr);
+    } else if (arr.primitive().device() == Device::ane) {
+      ane::eval(arr);
     } else {
       cpu::eval(arr);
     }
@@ -247,6 +250,8 @@ array eval_impl(std::vector<array> outputs, bool async) {
         auto s = get_stream(i);
         if (s.device == Device::gpu) {
           gpu::finalize(s);
+        } else if (s.device == Device::ane) {
+          ane::finalize(s);
         }
       }
       scheduler::wait_for_one();
@@ -287,6 +292,8 @@ array eval_impl(std::vector<array> outputs, bool async) {
     }
     if (s.device == Device::gpu) {
       gpu::finalize(s);
+    } else if (s.device == Device::ane) {
+      ane::finalize(s);
     }
   }
 

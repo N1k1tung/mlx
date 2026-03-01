@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 
+#include "mlx/backend/ane/device_info.h"
 #include "mlx/backend/cpu/device_info.h"
 #include "mlx/backend/gpu/device_info.h"
 #include "mlx/device.h"
@@ -9,7 +10,10 @@
 namespace mlx::core {
 
 Device& mutable_default_device() {
-  static Device default_device{gpu::is_available() ? Device::gpu : Device::cpu};
+  static Device default_device{
+      gpu::is_available()
+          ? Device::gpu
+          : (ane::is_available() ? Device::ane : Device::cpu)};
   return default_device;
 }
 
@@ -21,6 +25,10 @@ void set_default_device(const Device& d) {
   if (!gpu::is_available() && d == Device::gpu) {
     throw std::invalid_argument(
         "[set_default_device] Cannot set gpu device without gpu backend.");
+  }
+  if (!ane::is_available() && d == Device::ane) {
+    throw std::invalid_argument(
+        "[set_default_device] Cannot set ane device without ane backend.");
   }
   mutable_default_device() = d;
 }
@@ -39,6 +47,8 @@ bool is_available(const Device& d) {
       return cpu::is_available() && (d.index < cpu::device_count());
     case Device::gpu:
       return gpu::is_available() && (d.index < gpu::device_count());
+    case Device::ane:
+      return ane::is_available() && (d.index < ane::device_count());
   }
   // appease compiler
   return false;
@@ -50,6 +60,8 @@ int device_count(Device::DeviceType type) {
       return cpu::device_count();
     case Device::gpu:
       return gpu::device_count();
+    case Device::ane:
+      return ane::device_count();
   }
   // appease compiler
   return 0;
@@ -62,6 +74,8 @@ device_info(const Device& d) {
       return cpu::device_info(d.index);
     case Device::gpu:
       return gpu::device_info(d.index);
+    case Device::ane:
+      return ane::device_info(d.index);
   }
   // appease compiler
   static std::unordered_map<std::string, std::variant<std::string, size_t>>

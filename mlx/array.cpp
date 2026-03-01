@@ -27,14 +27,19 @@ array::array(
               dtype,
               std::move(primitive),
               std::move(inputs))) {
-  if (has_primitive() && this->primitive().stream().device == Device::gpu) {
+  if (
+      has_primitive() &&
+      (this->primitive().stream().device == Device::gpu ||
+       this->primitive().stream().device == Device::ane)) {
     for (auto& in : this->inputs()) {
       if (in.dtype() == float64) {
-        throw std::invalid_argument("float64 is not supported on the GPU");
+        throw std::invalid_argument(
+            "float64 is not supported on accelerator devices");
       }
     }
     if (this->dtype() == float64) {
-      throw std::invalid_argument("float64 is not supported on the GPU");
+      throw std::invalid_argument(
+          "float64 is not supported on accelerator devices");
     }
   }
 }

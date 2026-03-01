@@ -10,7 +10,7 @@ namespace mlx::core {
 // device.
 namespace detail {
 bool compile_available_for_device(const Device& device) {
-  return device == Device::gpu;
+  return device == Device::gpu || device == Device::ane;
 }
 } // namespace detail
 

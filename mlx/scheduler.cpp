@@ -1,6 +1,8 @@
 // Copyright © 2023 Apple Inc.
 
 #include "mlx/scheduler.h"
+#include "mlx/backend/ane/device_info.h"
+#include "mlx/backend/ane/eval.h"
 #include "mlx/backend/gpu/device_info.h"
 #include "mlx/backend/gpu/eval.h"
 
@@ -11,6 +13,10 @@ Stream default_stream(Device d) {
     throw std::invalid_argument(
         "[default_stream] Cannot get gpu stream without gpu backend.");
   }
+  if (!ane::is_available() && d == Device::ane) {
+    throw std::invalid_argument(
+        "[default_stream] Cannot get ane stream without ane backend.");
+  }
   return scheduler::scheduler().get_default_stream(d);
 }
 
@@ -18,6 +24,10 @@ void set_default_stream(Stream s) {
   if (!gpu::is_available() && s.device == Device::gpu) {
     throw std::invalid_argument(
         "[set_default_stream] Cannot set gpu stream without gpu backend.");
+  }
+  if (!ane::is_available() && s.device == Device::ane) {
+    throw std::invalid_argument(
+        "[set_default_stream] Cannot set ane stream without ane backend.");
   }
   return scheduler::scheduler().set_default_stream(s);
 }
@@ -30,6 +40,10 @@ Stream new_stream(Device d) {
   if (!gpu::is_available() && d == Device::gpu) {
     throw std::invalid_argument(
         "[new_stream] Cannot make gpu stream without gpu backend.");
+  }
+  if (!ane::is_available() && d == Device::ane) {
+    throw std::invalid_argument(
+        "[new_stream] Cannot make ane stream without ane backend.");
   }
   return scheduler::scheduler().new_stream(d);
 }
@@ -44,8 +58,10 @@ void synchronize(Stream s) {
     std::future<void> f = p->get_future();
     scheduler::enqueue(s, [p = std::move(p)]() { p->set_value(); });
     f.wait();
-  } else {
+  } else if (s.device == mlx::core::Device::gpu) {
     gpu::synchronize(s);
+  } else {
+    ane::synchronize(s);
   }
 }
 

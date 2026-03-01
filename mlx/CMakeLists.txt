@@ -100,6 +100,12 @@ else()
                  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/backend/cuda/no_cuda.cpp)
 endif()
 
+if(MLX_BUILD_ANE)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/backend/ane)
+else()
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/backend/no_ane)
+endif()
+
 if(MLX_BUILD_METAL OR MLX_BUILD_CUDA)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/backend/gpu)
 else()

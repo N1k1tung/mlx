@@ -11,10 +11,10 @@
 namespace mlx::core::linalg {
 
 void check_cpu_stream(const StreamOrDevice& s, const std::string& prefix) {
-  if (to_stream(s).device == Device::gpu) {
+  if (to_stream(s).device != Device::cpu) {
     throw std::invalid_argument(
         prefix +
-        " This op is not yet supported on the GPU. "
+        " This op is not yet supported on accelerator devices (gpu/ane). "
         "Explicitly pass a CPU stream to run it.");
   }
 }
