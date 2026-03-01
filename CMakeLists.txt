@@ -219,6 +219,15 @@ if(MLX_BUILD_METAL)
   target_link_libraries(mlx PUBLIC ${METAL_LIB} ${FOUNDATION_LIB} ${QUARTZ_LIB})
 endif()
 
+if(MLX_BUILD_ANE)
+  find_library(IOSURFACE_LIB IOSurface)
+  if(IOSURFACE_LIB)
+    target_link_libraries(mlx PUBLIC ${IOSURFACE_LIB})
+  else()
+    message(FATAL_ERROR "IOSurface not found. MLX_BUILD_ANE requires IOSurface.")
+  endif()
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # With newer clang/gcc versions following libs are implicitly linked, but when
   # building on old distributions they need to be explicitly listed.

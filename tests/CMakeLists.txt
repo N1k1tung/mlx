@@ -10,6 +10,10 @@ if(MLX_BUILD_METAL OR MLX_BUILD_CUDA)
   set(METAL_TEST_SOURCES gpu_tests.cpp)
 endif()
 
+if(MLX_BUILD_ANE)
+  set(ANE_TEST_SOURCES ane_tests.cpp)
+endif()
+
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 
 target_sources(
@@ -34,7 +38,8 @@ target_sources(
           utils_tests.cpp
           vmap_tests.cpp
           linalg_tests.cpp
-          ${METAL_TEST_SOURCES})
+          ${METAL_TEST_SOURCES}
+          ${ANE_TEST_SOURCES})
 
 target_link_libraries(tests PRIVATE mlx doctest)
 target_compile_options(tests PRIVATE ${SANITIZER_COMPILE_FLAGS})
