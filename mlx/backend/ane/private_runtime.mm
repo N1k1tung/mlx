@@ -71,11 +71,19 @@ bool runtime_verbose() {
   return enabled;
 }
 
-void runtime_log(const std::string& message) {
+void runtime_log(std::string_view message) {
   if (!runtime_verbose()) {
     return;
   }
   std::cerr << "[ane::runtime] " << message << "\n";
+}
+
+template <typename Fn>
+void runtime_log_lazy(Fn&& builder) {
+  if (!runtime_verbose()) {
+    return;
+  }
+  runtime_log(builder());
 }
 
 static constexpr unsigned int kQoS = 21;
@@ -487,8 +495,9 @@ bool prewarm_client(RuntimeState& s, std::string& reason) {
   if (compiled_tmp) {
     [[NSFileManager defaultManager] removeItemAtPath:compiled_url.path error:nil];
   }
-  reason = ok ? std::string("ok") : std::string("prewarm-ane-compile-load-failed:") + local_reason;
-  runtime_log(std::string("prewarm result: ") + reason);
+  reason = ok ? std::string("ok")
+              : std::string("prewarm-ane-compile-load-failed:") + local_reason;
+  runtime_log_lazy([&]() { return std::string("prewarm result: ") + reason; });
   return ok;
 }
 
@@ -756,17 +765,25 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
     return false;
   }
+  const bool verbose = runtime_verbose();
 
   @autoreleasepool {
-    runtime_log("dispatch start: staging inputs");
-    runtime_log("dispatch staging pre-sync begin");
+    if (verbose) {
+      runtime_log("dispatch start: staging inputs");
+      runtime_log("dispatch staging pre-sync begin");
+    }
     gpu::synchronize(arr.primitive().stream());
-    runtime_log("dispatch staging pre-sync complete");
+    if (verbose) {
+      runtime_log("dispatch staging pre-sync complete");
+    }
     for (size_t i = 0; i < inputs.size(); ++i) {
       auto& in = inputs[i];
-      runtime_log(
-          "dispatch stage input[" + std::to_string(i) +
-          "] begin status=" + std::to_string(static_cast<int>(in.status())));
+      if (verbose) {
+        runtime_log_lazy([&]() {
+          return "dispatch stage input[" + std::to_string(i) +
+              "] begin status=" + std::to_string(static_cast<int>(in.status()));
+        });
+      }
       if (in.status() == array::Status::unscheduled) {
         if (reason) {
           *reason = "input-unscheduled-at-dispatch:" + std::to_string(i);
@@ -774,9 +791,12 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         return false;
       }
       if (!in.is_available()) {
-        runtime_log(
-            "dispatch stage input[" + std::to_string(i) +
-            "] not-marked-available after pre-sync; proceeding");
+        if (verbose) {
+          runtime_log_lazy([&]() {
+            return "dispatch stage input[" + std::to_string(i) +
+                "] not-marked-available after pre-sync; proceeding";
+          });
+        }
       }
       auto* src = in.data<char>();
       if (src == nullptr) {
@@ -792,9 +812,14 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
           src,
           std::min(in.nbytes(), program.input_nbytes[i]));
       IOSurfaceUnlock(surface, 0, nullptr);
-      runtime_log("dispatch stage input[" + std::to_string(i) + "] complete");
+      if (verbose) {
+        runtime_log_lazy(
+            [&]() { return "dispatch stage input[" + std::to_string(i) + "] complete"; });
+      }
     }
-    runtime_log("dispatch memcpy to IOSurfaces complete");
+    if (verbose) {
+      runtime_log("dispatch memcpy to IOSurfaces complete");
+    }
 
     auto& s = runtime_state();
     NSMutableArray* input_objs =
@@ -831,7 +856,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       [output_indices addObject:@(i)];
     }
 
-    runtime_log("dispatch request build begin");
+    if (verbose) {
+      runtime_log("dispatch request build begin");
+    }
     id request_obj = ((id(*)(Class, SEL, id, id, id, id, id, id, id))objc_msgSend)(
         s.request_cls,
         @selector(requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:),
@@ -850,7 +877,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
 
     NSError* e = nil;
-    runtime_log("dispatch evaluate begin");
+    if (verbose) {
+      runtime_log("dispatch evaluate begin");
+    }
     BOOL ok = ((BOOL(*)(id, SEL, id, id, id, unsigned int, NSError**))objc_msgSend)(
         program.client,
         @selector(evaluateWithModel:options:request:qos:error:),
@@ -859,7 +888,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         request_obj,
         kQoS,
         &e);
-    runtime_log(std::string("dispatch evaluate end ok=") + (ok ? "1" : "0"));
+    if (verbose) {
+      runtime_log(ok ? "dispatch evaluate end ok=1" : "dispatch evaluate end ok=0");
+    }
     if (!ok) {
       if (reason) {
         *reason = e ? std::string([[e description] UTF8String])
@@ -871,7 +902,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
 
   for (size_t i = 0; i < outputs.size(); ++i) {
     auto& out = outputs[i];
-    runtime_log("dispatch output[" + std::to_string(i) + "] begin");
+    if (verbose) {
+      runtime_log_lazy([&]() { return "dispatch output[" + std::to_string(i) + "] begin"; });
+    }
     auto data_ref = out.data_shared_ptr();
     bool need_alloc = (data_ref == nullptr || data_ref->buffer.ptr() == nullptr);
     if (!need_alloc) {
@@ -902,9 +935,15 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         src,
         std::min(out.nbytes(), program.output_nbytes[i]));
     IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
-    runtime_log("dispatch output[" + std::to_string(i) + "] complete");
+    if (verbose) {
+      runtime_log_lazy([&]() {
+        return "dispatch output[" + std::to_string(i) + "] complete";
+      });
+    }
   }
-  runtime_log("dispatch output copy complete");
+  if (verbose) {
+    runtime_log("dispatch output copy complete");
+  }
 
   if (reason) {
     *reason = "ok";

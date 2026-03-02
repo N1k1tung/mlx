@@ -30,6 +30,7 @@ struct MLX_API DiagnosticsSnapshot {
 MLX_API DiagnosticsSnapshot get_diagnostics();
 MLX_API void reset_diagnostics();
 
+bool diagnostics_mode();
 bool strict_mode();
 bool verbose_mode();
 bool report_mode();

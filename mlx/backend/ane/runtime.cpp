@@ -84,14 +84,19 @@ std::string Runtime::make_cache_key(const array& arr) const {
 
 std::shared_ptr<Runtime::CompiledProgram> Runtime::get_or_compile(
     const array& arr) {
+  const bool diagnostics = diagnostics_mode();
   auto key = make_cache_key(arr);
   auto& primitive = arr.primitive();
   auto it = compile_cache_.find(key);
   if (it != compile_cache_.end()) {
-    note_compile_cache_hit(primitive);
+    if (diagnostics) {
+      note_compile_cache_hit(primitive);
+    }
     return it->second;
   }
-  note_compile_cache_miss(primitive);
+  if (diagnostics) {
+    note_compile_cache_miss(primitive);
+  }
   auto program = std::make_shared<CompiledProgram>();
   program->key = key;
   program->primitive = primitive.name();

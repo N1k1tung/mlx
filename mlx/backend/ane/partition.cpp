@@ -53,6 +53,9 @@ RouteDecision decide_route(const array& arr) {
 }
 
 void track_route_boundary(Stream stream, Route route) {
+  if (!diagnostics_mode()) {
+    return;
+  }
   std::lock_guard<std::mutex> lk(route_mutex());
   auto& routes = route_by_stream();
   auto it = routes.find(stream.index);

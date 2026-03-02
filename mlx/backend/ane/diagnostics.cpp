@@ -66,6 +66,11 @@ void verbose_log(
 
 } // namespace
 
+bool diagnostics_mode() {
+  static bool enabled = env::get_var("MLX_ANE_DIAGNOSTICS", 1) == 1;
+  return enabled;
+}
+
 DiagnosticsSnapshot get_diagnostics() {
   auto& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
@@ -84,16 +89,21 @@ bool strict_mode() {
 }
 
 bool verbose_mode() {
-  static bool verbose = env::get_var("MLX_ANE_VERBOSE", 0) == 1;
+  static bool verbose =
+      diagnostics_mode() && (env::get_var("MLX_ANE_VERBOSE", 0) == 1);
   return verbose;
 }
 
 bool report_mode() {
-  static bool report = env::get_var("MLX_ANE_REPORT_FALLBACKS", 0) == 1;
+  static bool report = diagnostics_mode() &&
+      (env::get_var("MLX_ANE_REPORT_FALLBACKS", 0) == 1);
   return report;
 }
 
 void note_total(const Primitive& primitive, bool supported) {
+  if (!diagnostics_mode()) {
+    return;
+  }
   register_summary_report();
   auto& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
@@ -105,6 +115,9 @@ void note_total(const Primitive& primitive, bool supported) {
 }
 
 void note_ane_dispatch(const Primitive& primitive, bool emulated) {
+  if (!diagnostics_mode()) {
+    return;
+  }
   auto& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
   s.snapshot.ane_dispatches++;
@@ -117,6 +130,9 @@ void note_ane_dispatch(const Primitive& primitive, bool emulated) {
 }
 
 void note_gpu_fallback(const Primitive& primitive, std::string_view reason) {
+  if (!diagnostics_mode()) {
+    return;
+  }
   auto& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
   s.snapshot.gpu_fallbacks++;
@@ -124,6 +140,9 @@ void note_gpu_fallback(const Primitive& primitive, std::string_view reason) {
 }
 
 void note_cpu_fallback(const Primitive& primitive, std::string_view reason) {
+  if (!diagnostics_mode()) {
+    return;
+  }
   auto& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
   s.snapshot.cpu_fallbacks++;
@@ -131,6 +150,9 @@ void note_cpu_fallback(const Primitive& primitive, std::string_view reason) {
 }
 
 void note_strict_rejection(const Primitive& primitive, std::string_view reason) {
+  if (!diagnostics_mode()) {
+    return;
+  }
   auto& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
   s.snapshot.strict_rejections++;
@@ -138,18 +160,27 @@ void note_strict_rejection(const Primitive& primitive, std::string_view reason) 
 }
 
 void note_compile_cache_hit(const Primitive&) {
+  if (!diagnostics_mode()) {
+    return;
+  }
   auto& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
   s.snapshot.compile_cache_hits++;
 }
 
 void note_compile_cache_miss(const Primitive&) {
+  if (!diagnostics_mode()) {
+    return;
+  }
   auto& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
   s.snapshot.compile_cache_misses++;
 }
 
 void note_partition_boundary(Stream stream, const char* from, const char* to) {
+  if (!diagnostics_mode()) {
+    return;
+  }
   auto& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
   s.snapshot.partition_boundaries++;
