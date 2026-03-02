@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "mlx/allocator.h"
+#include "mlx/backend/gpu/eval.h"
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
@@ -758,6 +759,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
 
   @autoreleasepool {
     runtime_log("dispatch start: staging inputs");
+    runtime_log("dispatch staging pre-sync begin");
+    gpu::synchronize(arr.primitive().stream());
+    runtime_log("dispatch staging pre-sync complete");
     for (size_t i = 0; i < inputs.size(); ++i) {
       auto& in = inputs[i];
       runtime_log(
@@ -770,10 +774,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         return false;
       }
       if (!in.is_available()) {
-        if (reason) {
-          *reason = "input-not-available-at-dispatch:" + std::to_string(i);
-        }
-        return false;
+        runtime_log(
+            "dispatch stage input[" + std::to_string(i) +
+            "] not-marked-available after pre-sync; proceeding");
       }
       auto* src = in.data<char>();
       if (src == nullptr) {
