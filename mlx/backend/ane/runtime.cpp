@@ -9,6 +9,7 @@
 #include "mlx/backend/ane/diagnostics.h"
 #include "mlx/backend/ane/memory.h"
 #include "mlx/backend/ane/private_runtime.h"
+#include "mlx/backend/gpu/device_info.h"
 #include "mlx/backend/gpu/eval.h"
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
@@ -34,16 +35,24 @@ Runtime& runtime() {
 }
 
 void Runtime::new_stream(Stream stream) {
-  // ANE streams currently reuse Metal queue/command-buffer lifecycle.
-  gpu::new_stream(stream);
+  // ANE streams currently reuse Metal queue/command-buffer lifecycle when
+  // available. Keep this optional so ANE does not hard-crash on systems where
+  // GPU backend is unavailable.
+  if (gpu::is_available()) {
+    gpu::new_stream(stream);
+  }
 }
 
 void Runtime::finalize(Stream stream) {
-  gpu::finalize(stream);
+  if (gpu::is_available()) {
+    gpu::finalize(stream);
+  }
 }
 
 void Runtime::synchronize(Stream stream) {
-  gpu::synchronize(stream);
+  if (gpu::is_available()) {
+    gpu::synchronize(stream);
+  }
 }
 
 bool Runtime::is_runtime_available() {
