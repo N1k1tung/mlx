@@ -5,5 +5,6 @@ target_sources(
           ${CMAKE_CURRENT_SOURCE_DIR}/eval.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/memory.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/partition.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/private_runtime.mm
           ${CMAKE_CURRENT_SOURCE_DIR}/runtime.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/support.cpp)

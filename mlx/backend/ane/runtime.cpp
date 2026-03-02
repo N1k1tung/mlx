@@ -2,13 +2,13 @@
 
 #include "mlx/backend/ane/runtime.h"
 
-#include <dlfcn.h>
-
 #include <cstdlib>
+#include <iostream>
 #include <sstream>
 
 #include "mlx/backend/ane/diagnostics.h"
 #include "mlx/backend/ane/memory.h"
+#include "mlx/backend/ane/private_runtime.h"
 #include "mlx/backend/gpu/eval.h"
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
@@ -17,11 +17,9 @@ namespace mlx::core::ane {
 
 namespace {
 
-std::string read_env(const char* name) {
-  if (const char* value = std::getenv(name)) {
-    return std::string(value);
-  }
-  return {};
+bool private_runtime_enabled() {
+  static bool enabled = env::get_var("MLX_ANE_PRIVATE_RUNTIME", 1) == 1;
+  return enabled;
 }
 
 } // namespace
@@ -46,6 +44,18 @@ void Runtime::finalize(Stream stream) {
 
 void Runtime::synchronize(Stream stream) {
   gpu::synchronize(stream);
+}
+
+bool Runtime::is_runtime_available() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  (void)try_initialize_runtime();
+  return runtime_available_;
+}
+
+std::string Runtime::runtime_unavailable_reason() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  (void)try_initialize_runtime();
+  return runtime_unavailable_reason_;
 }
 
 std::string Runtime::make_cache_key(const array& arr) const {
@@ -78,6 +88,13 @@ std::shared_ptr<Runtime::CompiledProgram> Runtime::get_or_compile(
   program->primitive = primitive.name();
   program->num_inputs = arr.inputs().size();
   program->num_outputs = arr.outputs().size();
+  if (runtime_available_) {
+    std::string reason;
+    program->native_program = private_runtime::compile(arr, &reason);
+    program->native_compile_reason = reason;
+  } else {
+    program->native_compile_reason = runtime_unavailable_reason_;
+  }
   compile_cache_.emplace(key, program);
   return program;
 }
@@ -88,16 +105,18 @@ bool Runtime::try_initialize_runtime() {
   }
   runtime_checked_ = true;
 
-  // Allow an explicit private-runtime dylib path for internal deployments.
-  // We do not assume a stable private ABI in open-source builds.
-  auto dylib_path = read_env("MLX_ANE_RUNTIME_DYLIB");
-  if (dylib_path.empty()) {
+  if (!private_runtime_enabled()) {
     runtime_available_ = false;
+    runtime_unavailable_reason_ = "private-runtime-disabled";
     return runtime_available_;
   }
 
-  runtime_handle_ = dlopen(dylib_path.c_str(), RTLD_LOCAL | RTLD_LAZY);
-  runtime_available_ = (runtime_handle_ != nullptr);
+  runtime_available_ =
+      private_runtime::available(&runtime_unavailable_reason_);
+  if (!runtime_available_) {
+    std::cerr << "[ane::runtime] unavailable: " << runtime_unavailable_reason_
+              << "\n";
+  }
   return runtime_available_;
 }
 
@@ -107,16 +126,17 @@ bool Runtime::should_use_iosurface() const {
 }
 
 bool Runtime::emulation_enabled() const {
-  // Default on to preserve current behavior until a private runtime is wired.
-  static bool emulate = env::get_var("MLX_ANE_EMULATE", 1) == 1;
+  // Default off so diagnostics reflect true native ANE availability.
+  static bool emulate = env::get_var("MLX_ANE_EMULATE", 0) == 1;
   return emulate;
 }
 
 DispatchResult Runtime::dispatch(array& arr) {
+  std::shared_ptr<CompiledProgram> program;
   {
     std::lock_guard<std::mutex> lk(mutex_);
-    get_or_compile(arr);
     (void)try_initialize_runtime();
+    program = get_or_compile(arr);
   }
 
   // Build explicit IOSurface bindings when requested so buffer wrapping is
@@ -127,19 +147,30 @@ DispatchResult Runtime::dispatch(array& arr) {
     }
   }
 
-  if (runtime_available_) {
-    return {
-        DispatchStatus::dispatch_failed,
-        "private-runtime-abi-not-integrated",
-    };
+  if (runtime_available_ && program && program->native_program) {
+    std::string reason;
+    if (private_runtime::dispatch(*program->native_program, arr, &reason)) {
+      return {DispatchStatus::dispatched, "private-runtime-dispatch"};
+    }
+    return {DispatchStatus::dispatch_failed, reason};
   }
 
-  if (!emulation_enabled()) {
-    return {DispatchStatus::runtime_unavailable, "runtime-unavailable"};
+  if (runtime_available_ && program && !program->native_program) {
+    return {DispatchStatus::dispatch_failed, program->native_compile_reason};
   }
 
-  gpu::eval(arr);
-  return {DispatchStatus::dispatched_emulated, "emulated-via-gpu"};
+  if (!runtime_available_) {
+    if (!emulation_enabled()) {
+      return {
+          DispatchStatus::runtime_unavailable,
+          "runtime-unavailable:" + runtime_unavailable_reason_,
+      };
+    }
+    gpu::eval(arr);
+    return {DispatchStatus::dispatched_emulated, "emulated-via-gpu"};
+  }
+
+  return {DispatchStatus::dispatch_failed, "unexpected-runtime-state"};
 }
 
 } // namespace mlx::core::ane

@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 #include "mlx/array.h"
+#include "mlx/backend/ane/private_runtime.h"
 
 namespace mlx::core::ane {
 
@@ -43,6 +44,9 @@ class Runtime {
   void finalize(Stream stream);
   void synchronize(Stream stream);
 
+  bool is_runtime_available();
+  std::string runtime_unavailable_reason();
+
   DispatchResult dispatch(array& arr);
 
  private:
@@ -53,6 +57,8 @@ class Runtime {
     std::string primitive;
     size_t num_inputs{0};
     size_t num_outputs{0};
+    std::shared_ptr<private_runtime::Program> native_program;
+    std::string native_compile_reason;
   };
 
   std::string make_cache_key(const array& arr) const;
@@ -64,6 +70,7 @@ class Runtime {
   mutable std::mutex mutex_;
   bool runtime_checked_{false};
   bool runtime_available_{false};
+  std::string runtime_unavailable_reason_{"uninitialized"};
   void* runtime_handle_{nullptr};
   std::unordered_map<std::string, std::shared_ptr<CompiledProgram>>
       compile_cache_;
