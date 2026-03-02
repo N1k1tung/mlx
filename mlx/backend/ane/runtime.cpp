@@ -139,12 +139,6 @@ bool Runtime::should_use_iosurface() const {
   return use_iosurface;
 }
 
-bool Runtime::emulation_enabled() const {
-  // Default off so diagnostics reflect true native ANE availability.
-  static bool emulate = env::get_var("MLX_ANE_EMULATE", 0) == 1;
-  return emulate;
-}
-
 DispatchResult Runtime::dispatch(array& arr) {
   std::shared_ptr<CompiledProgram> program;
   {
@@ -174,14 +168,10 @@ DispatchResult Runtime::dispatch(array& arr) {
   }
 
   if (!runtime_available_) {
-    if (!emulation_enabled()) {
-      return {
-          DispatchStatus::runtime_unavailable,
-          "runtime-unavailable:" + runtime_unavailable_reason_,
-      };
-    }
-    gpu::eval(arr);
-    return {DispatchStatus::dispatched_emulated, "emulated-via-gpu"};
+    return {
+        DispatchStatus::runtime_unavailable,
+        "runtime-unavailable:" + runtime_unavailable_reason_,
+    };
   }
 
   return {DispatchStatus::dispatch_failed, "unexpected-runtime-state"};

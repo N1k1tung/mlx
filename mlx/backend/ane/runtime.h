@@ -14,7 +14,6 @@ namespace mlx::core::ane {
 
 enum class DispatchStatus {
   dispatched,
-  dispatched_emulated,
   runtime_unavailable,
   dispatch_failed,
 };
@@ -24,12 +23,7 @@ struct DispatchResult {
   std::string reason;
 
   bool executed() const {
-    return status == DispatchStatus::dispatched ||
-        status == DispatchStatus::dispatched_emulated;
-  }
-
-  bool emulated() const {
-    return status == DispatchStatus::dispatched_emulated;
+    return status == DispatchStatus::dispatched;
   }
 };
 
@@ -64,7 +58,6 @@ class Runtime {
   std::string make_cache_key(const array& arr) const;
   std::shared_ptr<CompiledProgram> get_or_compile(const array& arr);
   bool should_use_iosurface() const;
-  bool emulation_enabled() const;
   bool try_initialize_runtime();
 
   mutable std::mutex mutex_;

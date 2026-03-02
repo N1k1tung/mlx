@@ -10,7 +10,7 @@ DiagnosticsSnapshot get_diagnostics() {
 
 void reset_diagnostics() {}
 
-bool strict_mode() {
+bool diagnostics_mode() {
   return false;
 }
 
@@ -24,13 +24,11 @@ bool report_mode() {
 
 void note_total(const Primitive&, bool) {}
 
-void note_ane_dispatch(const Primitive&, bool) {}
+void note_ane_dispatch(const Primitive&) {}
 
 void note_gpu_fallback(const Primitive&, std::string_view) {}
 
 void note_cpu_fallback(const Primitive&, std::string_view) {}
-
-void note_strict_rejection(const Primitive&, std::string_view) {}
 
 void note_compile_cache_hit(const Primitive&) {}
 

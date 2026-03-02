@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <typeinfo>
+#include <utility>
 #include <vector>
 
 #include "mlx/allocator.h"
@@ -61,30 +62,49 @@ bool require_probe() {
   return enabled;
 }
 
+bool debug_mode() {
+  static bool enabled = env::get_var("MLX_ANE_DEBUG", 0) == 1;
+  return enabled;
+}
+
 bool dump_mil_enabled() {
-  static bool enabled = env::get_var("MLX_ANE_DUMP_MIL", 0) == 1;
+  static bool enabled = env::get_var("MLX_ANE_DUMP_MIL", debug_mode() ? 1 : 0) == 1;
   return enabled;
 }
 
 bool runtime_verbose() {
-  static bool enabled = env::get_var("MLX_ANE_VERBOSE", 0) == 1;
+  static bool enabled =
+      debug_mode() || (env::get_var("MLX_ANE_VERBOSE", 0) == 1);
   return enabled;
 }
 
-void runtime_log(std::string_view message) {
-  if (!runtime_verbose()) {
+void runtime_log_if(bool enabled, std::string_view message) {
+  if (!enabled) {
     return;
   }
   std::cerr << "[ane::runtime] " << message << "\n";
 }
 
 template <typename Fn>
-void runtime_log_lazy(Fn&& builder) {
-  if (!runtime_verbose()) {
+void runtime_log_lazy_if(bool enabled, Fn&& builder) {
+  if (!enabled) {
     return;
   }
-  runtime_log(builder());
+  runtime_log_if(true, builder());
 }
+
+void runtime_log(std::string_view message) {
+  runtime_log_if(runtime_verbose(), message);
+}
+
+template <typename Fn>
+void runtime_log_lazy(Fn&& builder) {
+  runtime_log_lazy_if(runtime_verbose(), std::forward<Fn>(builder));
+}
+
+#define DRUNTIME_LOG(VERBOSE, MESSAGE) runtime_log_if((VERBOSE), (MESSAGE))
+#define DRUNTIME_LOG_LAZY(VERBOSE, BUILDER) \
+  runtime_log_lazy_if((VERBOSE), (BUILDER))
 
 static constexpr unsigned int kQoS = 21;
 static constexpr int kMLComputeUnitsAll = 2;
@@ -768,22 +788,16 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
   const bool verbose = runtime_verbose();
 
   @autoreleasepool {
-    if (verbose) {
-      runtime_log("dispatch start: staging inputs");
-      runtime_log("dispatch staging pre-sync begin");
-    }
+    DRUNTIME_LOG(verbose, "dispatch start: staging inputs");
+    DRUNTIME_LOG(verbose, "dispatch staging pre-sync begin");
     gpu::synchronize(arr.primitive().stream());
-    if (verbose) {
-      runtime_log("dispatch staging pre-sync complete");
-    }
+    DRUNTIME_LOG(verbose, "dispatch staging pre-sync complete");
     for (size_t i = 0; i < inputs.size(); ++i) {
       auto& in = inputs[i];
-      if (verbose) {
-        runtime_log_lazy([&]() {
-          return "dispatch stage input[" + std::to_string(i) +
-              "] begin status=" + std::to_string(static_cast<int>(in.status()));
-        });
-      }
+      DRUNTIME_LOG_LAZY(verbose, [&]() {
+        return "dispatch stage input[" + std::to_string(i) +
+            "] begin status=" + std::to_string(static_cast<int>(in.status()));
+      });
       if (in.status() == array::Status::unscheduled) {
         if (reason) {
           *reason = "input-unscheduled-at-dispatch:" + std::to_string(i);
@@ -791,12 +805,10 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         return false;
       }
       if (!in.is_available()) {
-        if (verbose) {
-          runtime_log_lazy([&]() {
-            return "dispatch stage input[" + std::to_string(i) +
-                "] not-marked-available after pre-sync; proceeding";
-          });
-        }
+        DRUNTIME_LOG_LAZY(verbose, [&]() {
+          return "dispatch stage input[" + std::to_string(i) +
+              "] not-marked-available after pre-sync; proceeding";
+        });
       }
       auto* src = in.data<char>();
       if (src == nullptr) {
@@ -812,14 +824,11 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
           src,
           std::min(in.nbytes(), program.input_nbytes[i]));
       IOSurfaceUnlock(surface, 0, nullptr);
-      if (verbose) {
-        runtime_log_lazy(
-            [&]() { return "dispatch stage input[" + std::to_string(i) + "] complete"; });
-      }
+      DRUNTIME_LOG_LAZY(
+          verbose,
+          [&]() { return "dispatch stage input[" + std::to_string(i) + "] complete"; });
     }
-    if (verbose) {
-      runtime_log("dispatch memcpy to IOSurfaces complete");
-    }
+    DRUNTIME_LOG(verbose, "dispatch memcpy to IOSurfaces complete");
 
     auto& s = runtime_state();
     NSMutableArray* input_objs =
@@ -856,9 +865,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       [output_indices addObject:@(i)];
     }
 
-    if (verbose) {
-      runtime_log("dispatch request build begin");
-    }
+    DRUNTIME_LOG(verbose, "dispatch request build begin");
     id request_obj = ((id(*)(Class, SEL, id, id, id, id, id, id, id))objc_msgSend)(
         s.request_cls,
         @selector(requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:),
@@ -877,9 +884,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
 
     NSError* e = nil;
-    if (verbose) {
-      runtime_log("dispatch evaluate begin");
-    }
+    DRUNTIME_LOG(verbose, "dispatch evaluate begin");
     BOOL ok = ((BOOL(*)(id, SEL, id, id, id, unsigned int, NSError**))objc_msgSend)(
         program.client,
         @selector(evaluateWithModel:options:request:qos:error:),
@@ -888,9 +893,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         request_obj,
         kQoS,
         &e);
-    if (verbose) {
-      runtime_log(ok ? "dispatch evaluate end ok=1" : "dispatch evaluate end ok=0");
-    }
+    DRUNTIME_LOG(verbose, ok ? "dispatch evaluate end ok=1" : "dispatch evaluate end ok=0");
     if (!ok) {
       if (reason) {
         *reason = e ? std::string([[e description] UTF8String])
@@ -902,9 +905,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
 
   for (size_t i = 0; i < outputs.size(); ++i) {
     auto& out = outputs[i];
-    if (verbose) {
-      runtime_log_lazy([&]() { return "dispatch output[" + std::to_string(i) + "] begin"; });
-    }
+    DRUNTIME_LOG_LAZY(
+        verbose,
+        [&]() { return "dispatch output[" + std::to_string(i) + "] begin"; });
     auto data_ref = out.data_shared_ptr();
     bool need_alloc = (data_ref == nullptr || data_ref->buffer.ptr() == nullptr);
     if (!need_alloc) {
@@ -935,21 +938,20 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         src,
         std::min(out.nbytes(), program.output_nbytes[i]));
     IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
-    if (verbose) {
-      runtime_log_lazy([&]() {
-        return "dispatch output[" + std::to_string(i) + "] complete";
-      });
-    }
+    DRUNTIME_LOG_LAZY(verbose, [&]() {
+      return "dispatch output[" + std::to_string(i) + "] complete";
+    });
   }
-  if (verbose) {
-    runtime_log("dispatch output copy complete");
-  }
+  DRUNTIME_LOG(verbose, "dispatch output copy complete");
 
   if (reason) {
     *reason = "ok";
   }
   return true;
 }
+
+#undef DRUNTIME_LOG
+#undef DRUNTIME_LOG_LAZY
 
 } // namespace mlx::core::ane::private_runtime
 

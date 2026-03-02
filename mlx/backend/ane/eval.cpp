@@ -1,8 +1,5 @@
 // Copyright © 2026 Apple Inc.
 
-#include <stdexcept>
-#include <string>
-
 #include "mlx/backend/ane/diagnostics.h"
 #include "mlx/backend/ane/eval.h"
 #include "mlx/backend/ane/partition.h"
@@ -27,20 +24,11 @@ void eval(array& arr) {
     track_route_boundary(primitive.stream(), decision.route);
   }
 
-  if (!decision.supported && strict_mode()) {
-    if (diagnostics) {
-      note_strict_rejection(primitive, decision.reason);
-    }
-    throw std::runtime_error(
-        std::string("[ane::eval] Primitive not supported in strict ANE mode: ") +
-        primitive.name());
-  }
-
   if (decision.route == Route::ane) {
     auto result = runtime().dispatch(arr);
     if (result.executed()) {
       if (diagnostics) {
-        note_ane_dispatch(primitive, result.emulated());
+        note_ane_dispatch(primitive);
       }
       return;
     }

@@ -24,15 +24,18 @@ DiagnosticsState& state() {
   return s;
 }
 
+bool debug_mode() {
+  static bool enabled = env::get_var("MLX_ANE_DEBUG", 0) == 1;
+  return enabled;
+}
+
 void print_summary() {
   auto s = get_diagnostics();
   std::cerr << "[ane::diagnostics] total_ops=" << s.total_ops
             << " supported_ops=" << s.supported_ops
             << " ane_dispatches=" << s.ane_dispatches
-            << " ane_emulated_dispatches=" << s.ane_emulated_dispatches
             << " gpu_fallbacks=" << s.gpu_fallbacks
             << " cpu_fallbacks=" << s.cpu_fallbacks
-            << " strict_rejections=" << s.strict_rejections
             << " compile_cache_hits=" << s.compile_cache_hits
             << " compile_cache_misses=" << s.compile_cache_misses
             << " partition_boundaries=" << s.partition_boundaries << "\n";
@@ -67,7 +70,7 @@ void verbose_log(
 } // namespace
 
 bool diagnostics_mode() {
-  static bool enabled = env::get_var("MLX_ANE_DIAGNOSTICS", 1) == 1;
+  static bool enabled = env::get_var("MLX_ANE_DIAGNOSTICS", debug_mode() ? 1 : 0) == 1;
   return enabled;
 }
 
@@ -83,20 +86,15 @@ void reset_diagnostics() {
   s.snapshot = {};
 }
 
-bool strict_mode() {
-  static bool strict = env::get_var("MLX_ANE_STRICT", 0) == 1;
-  return strict;
-}
-
 bool verbose_mode() {
-  static bool verbose =
-      diagnostics_mode() && (env::get_var("MLX_ANE_VERBOSE", 0) == 1);
+  static bool verbose = diagnostics_mode() &&
+      (debug_mode() || (env::get_var("MLX_ANE_VERBOSE", 0) == 1));
   return verbose;
 }
 
 bool report_mode() {
   static bool report = diagnostics_mode() &&
-      (env::get_var("MLX_ANE_REPORT_FALLBACKS", 0) == 1);
+      (debug_mode() || (env::get_var("MLX_ANE_REPORT_FALLBACKS", 0) == 1));
   return report;
 }
 
@@ -114,19 +112,14 @@ void note_total(const Primitive& primitive, bool supported) {
   verbose_log(primitive, supported ? "ane-candidate" : "fallback-candidate", "");
 }
 
-void note_ane_dispatch(const Primitive& primitive, bool emulated) {
+void note_ane_dispatch(const Primitive& primitive) {
   if (!diagnostics_mode()) {
     return;
   }
   auto& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
   s.snapshot.ane_dispatches++;
-  if (emulated) {
-    s.snapshot.ane_emulated_dispatches++;
-    verbose_log(primitive, "ane-emulated", "");
-  } else {
-    verbose_log(primitive, "ane", "");
-  }
+  verbose_log(primitive, "ane", "");
 }
 
 void note_gpu_fallback(const Primitive& primitive, std::string_view reason) {
@@ -147,16 +140,6 @@ void note_cpu_fallback(const Primitive& primitive, std::string_view reason) {
   std::lock_guard<std::mutex> lk(s.mutex);
   s.snapshot.cpu_fallbacks++;
   verbose_log(primitive, "cpu-fallback", reason);
-}
-
-void note_strict_rejection(const Primitive& primitive, std::string_view reason) {
-  if (!diagnostics_mode()) {
-    return;
-  }
-  auto& s = state();
-  std::lock_guard<std::mutex> lk(s.mutex);
-  s.snapshot.strict_rejections++;
-  verbose_log(primitive, "strict-reject", reason);
 }
 
 void note_compile_cache_hit(const Primitive&) {
