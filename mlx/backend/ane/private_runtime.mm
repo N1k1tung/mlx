@@ -12,12 +12,14 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <typeinfo>
 #include <utility>
 #include <vector>
@@ -76,6 +78,37 @@ bool runtime_verbose() {
   static bool enabled =
       debug_mode() || (env::get_var("MLX_ANE_VERBOSE", 0) == 1);
   return enabled;
+}
+
+bool runtime_presync_stream() {
+  static bool enabled = env::get_var("MLX_ANE_PRESYNC_STREAM", 0) == 1;
+  return enabled;
+}
+
+int runtime_input_wait_ms() {
+  static int wait_ms = env::get_var("MLX_ANE_INPUT_WAIT_MS", 10);
+  return std::max(wait_ms, 0);
+}
+
+bool wait_until_available(const array& in, int timeout_ms) {
+  if (in.is_available()) {
+    return true;
+  }
+  if (timeout_ms <= 0) {
+    return false;
+  }
+  auto start = std::chrono::steady_clock::now();
+  while (true) {
+    if (in.is_available()) {
+      return true;
+    }
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    if (elapsed.count() >= timeout_ms) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 }
 
 void runtime_log_if(bool enabled, std::string_view message) {
@@ -786,12 +819,22 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     return false;
   }
   const bool verbose = runtime_verbose();
+  const int input_wait_ms = runtime_input_wait_ms();
 
   @autoreleasepool {
     DRUNTIME_LOG(verbose, "dispatch start: staging inputs");
-    DRUNTIME_LOG(verbose, "dispatch staging pre-sync begin");
-    gpu::synchronize(arr.primitive().stream());
-    DRUNTIME_LOG(verbose, "dispatch staging pre-sync complete");
+    if (runtime_presync_stream()) {
+      DRUNTIME_LOG(verbose, "dispatch staging pre-sync begin");
+      try {
+        gpu::synchronize(arr.primitive().stream());
+      } catch (const std::exception& e) {
+        if (reason) {
+          *reason = std::string("dispatch-presync-failed:") + e.what();
+        }
+        return false;
+      }
+      DRUNTIME_LOG(verbose, "dispatch staging pre-sync complete");
+    }
     for (size_t i = 0; i < inputs.size(); ++i) {
       auto& in = inputs[i];
       DRUNTIME_LOG_LAZY(verbose, [&]() {
@@ -805,10 +848,18 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         return false;
       }
       if (!in.is_available()) {
-        DRUNTIME_LOG_LAZY(verbose, [&]() {
-          return "dispatch stage input[" + std::to_string(i) +
-              "] not-marked-available after pre-sync; proceeding";
-        });
+        if (!wait_until_available(in, input_wait_ms)) {
+          if (reason) {
+            *reason = "input-not-available-at-dispatch:" + std::to_string(i);
+          }
+          return false;
+        }
+        DRUNTIME_LOG_LAZY(
+            verbose,
+            [&]() {
+              return "dispatch stage input[" + std::to_string(i) +
+                  "] became-available-after-poll";
+            });
       }
       auto* src = in.data<char>();
       if (src == nullptr) {
