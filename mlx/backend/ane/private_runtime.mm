@@ -61,11 +61,6 @@ std::mutex& runtime_mutex() {
   return mtx;
 }
 
-bool require_probe() {
-  static bool enabled = env::get_var("MLX_ANE_REQUIRE_PROBE", 0) == 1;
-  return enabled;
-}
-
 bool debug_mode() {
   static bool enabled = env::get_var("MLX_ANE_DEBUG", 0) == 1;
   return enabled;
@@ -251,27 +246,12 @@ void install_profile_exit_reporter() {
 
 static constexpr unsigned int kQoS = 21;
 static constexpr int kMLComputeUnitsAll = 2;
-static constexpr const char* kDefaultPrewarmModel =
-    "/System/Library/PrivateFrameworks/TuriCore.framework/Versions/A/Resources/maml-video-light.mlmodel";
 
 NSDictionary* mil_compile_options() {
   return @{
     @"kANEFModelType" : @"kANEFModelMIL",
     @"kANEFNetPlistFilenameKey" : @"model.mil",
   };
-}
-
-inline bool prewarm_enabled() {
-  static bool enabled = env::get_var("MLX_ANE_PREWARM", 1) == 1;
-  return enabled;
-}
-
-std::string prewarm_model_path() {
-  const char* path = std::getenv("MLX_ANE_PREWARM_MODEL");
-  if (path != nullptr && path[0] != '\0') {
-    return std::string(path);
-  }
-  return std::string(kDefaultPrewarmModel);
 }
 
 std::string error_to_string(NSError* e, std::string_view fallback) {
@@ -916,92 +896,6 @@ bool compile_load_model_with_options(
   return true;
 }
 
-bool prewarm_client(RuntimeState& s, std::string& reason) {
-  if (!prewarm_enabled()) {
-    reason = "prewarm-disabled";
-    return true;
-  }
-
-  std::string model_path = prewarm_model_path();
-  NSString* src_path = [NSString stringWithUTF8String:model_path.c_str()];
-  if (![[NSFileManager defaultManager] fileExistsAtPath:src_path]) {
-    reason = "prewarm-model-not-found:" + model_path;
-    return false;
-  }
-
-  NSURL* src_url = [NSURL fileURLWithPath:src_path];
-  NSURL* compiled_url = src_url;
-  bool compiled_tmp = false;
-
-  if (![[src_path pathExtension] isEqualToString:@"mlmodelc"]) {
-    Class MLModelCls = NSClassFromString(@"MLModel");
-    if (MLModelCls == nil) {
-      reason = "prewarm-coreml-class-missing";
-      return false;
-    }
-    NSError* e = nil;
-    compiled_url = ((id(*)(Class, SEL, id, NSError**))objc_msgSend)(
-        MLModelCls, @selector(compileModelAtURL:error:), src_url, &e);
-    if (compiled_url == nil) {
-      reason = "prewarm-coreml-compile-failed:" + error_to_string(e, "no-error");
-      return false;
-    }
-    compiled_tmp = true;
-  }
-
-  Class MLModelCls = NSClassFromString(@"MLModel");
-  Class MLModelCfgCls = NSClassFromString(@"MLModelConfiguration");
-  if (MLModelCls == nil || MLModelCfgCls == nil) {
-    if (compiled_tmp) {
-      [[NSFileManager defaultManager] removeItemAtPath:compiled_url.path error:nil];
-    }
-    reason = "prewarm-coreml-class-missing";
-    return false;
-  }
-
-  id cfg = ((id(*)(Class, SEL))objc_msgSend)(MLModelCfgCls, @selector(new));
-  if (cfg != nil && [cfg respondsToSelector:@selector(setComputeUnits:)]) {
-    ((void(*)(id, SEL, NSInteger))objc_msgSend)(
-        cfg, @selector(setComputeUnits:), kMLComputeUnitsAll);
-  }
-
-  NSError* e = nil;
-  id loaded = ((id(*)(Class, SEL, id, id, NSError**))objc_msgSend)(
-      MLModelCls, @selector(modelWithContentsOfURL:configuration:error:), compiled_url, cfg, &e);
-  if (loaded == nil) {
-    if (compiled_tmp) {
-      [[NSFileManager defaultManager] removeItemAtPath:compiled_url.path error:nil];
-    }
-    reason = "prewarm-coreml-load-failed:" + error_to_string(e, "no-error");
-    return false;
-  }
-  (void)loaded;
-
-  NSString* key = @"mlx-ane-prewarm";
-  id model = ((id(*)(Class, SEL, id, id))objc_msgSend)(
-      s.model_cls, @selector(modelAtURL:key:), compiled_url, key);
-  if (model == nil) {
-    if (compiled_tmp) {
-      [[NSFileManager defaultManager] removeItemAtPath:compiled_url.path error:nil];
-    }
-    reason = "prewarm-ane-model-create-failed";
-    return false;
-  }
-
-  std::string local_reason;
-  bool ok = compile_load_model_with_options(s, model, nil, local_reason);
-  if (ok) {
-    unload_model(s, model);
-  }
-  if (compiled_tmp) {
-    [[NSFileManager defaultManager] removeItemAtPath:compiled_url.path error:nil];
-  }
-  reason = ok ? std::string("ok")
-              : std::string("prewarm-ane-compile-load-failed:") + local_reason;
-  DRUNTIME_LOG_LAZY([&]() { return std::string("prewarm result: ") + reason; });
-  return ok;
-}
-
 void unload_model(RuntimeState& s, id model) {
   if (s.client == nil || model == nil) {
     return;
@@ -1009,39 +903,6 @@ void unload_model(RuntimeState& s, id model) {
   NSError* e = nil;
   (void)((BOOL(*)(id, SEL, id, id, unsigned int, NSError**))objc_msgSend)(
       s.client, @selector(unloadModel:options:qos:error:), model, nil, kQoS, &e);
-}
-
-bool compile_probe(RuntimeState& s, std::string& reason) {
-  std::string probe_mil =
-      "program(1.3)\n"
-      "[buildInfo = dict<string, string>({{\"coremlc-component-MIL\", \"3510.2.1\"}, "
-      "{\"coremlc-version\", \"3505.4.1\"}, {\"coremltools-component-milinternal\", \"\"}, "
-      "{\"coremltools-version\", \"9.0\"}})]\n"
-      "{\n"
-      "    func main<ios18>(tensor<fp16, [1, 1, 1, 4]> a, tensor<fp16, [1, 1, 1, 4]> b) {\n"
-      "        tensor<fp16, [1, 1, 1, 4]> out = add(x = a, y = b)[name = string(\"probe\")];\n"
-      "    } -> (out);\n"
-      "}\n";
-  maybe_dump_mil("probe", probe_mil);
-  std::string local_reason;
-  NSString* model_dir = create_mil_model_dir(probe_mil, local_reason);
-  if (model_dir == nil) {
-    reason = local_reason;
-    return false;
-  }
-  id model = create_model(s, model_dir, local_reason);
-  if (model == nil) {
-    reason = local_reason;
-    [[NSFileManager defaultManager] removeItemAtPath:model_dir error:nil];
-    return false;
-  }
-  bool ok = compile_load_model(s, model, local_reason);
-  if (ok) {
-    unload_model(s, model);
-  }
-  [[NSFileManager defaultManager] removeItemAtPath:model_dir error:nil];
-  reason = local_reason;
-  return ok;
 }
 
 bool initialize_locked(std::string* reason_out) {
@@ -1088,27 +949,6 @@ bool initialize_locked(std::string* reason_out) {
       *reason_out = s.reason;
     }
     return false;
-  }
-
-  std::string prewarm_reason;
-  if (!prewarm_client(s, prewarm_reason)) {
-    s.reason = "ane-runtime-prewarm-failed:" + prewarm_reason;
-    if (reason_out) {
-      *reason_out = s.reason;
-    }
-    return false;
-  }
-  DRUNTIME_LOG("prewarm complete");
-
-  if (require_probe()) {
-    std::string probe_reason;
-    if (!compile_probe(s, probe_reason)) {
-      s.reason = "ane-runtime-probe-failed:" + probe_reason;
-      if (reason_out) {
-        *reason_out = s.reason;
-      }
-      return false;
-    }
   }
 
   s.available = true;
