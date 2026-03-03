@@ -12,7 +12,9 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -69,27 +71,168 @@ bool debug_mode() {
   return enabled;
 }
 
+bool runtime_verbose_mode() {
+  static bool enabled = env::get_var(
+                            "MLX_ANE_RUNTIME_VERBOSE",
+                            env::get_var("MLX_ANE_VERBOSE", 0)) == 1;
+  return enabled;
+}
+
 bool dump_mil_enabled() {
   static bool enabled = env::get_var("MLX_ANE_DUMP_MIL", debug_mode() ? 1 : 0) == 1;
   return enabled;
 }
 
 void runtime_log(std::string_view message) {
-    std::cerr << "[ane::runtime] " << message << "\n";
+  if (!runtime_verbose_mode()) {
+    return;
+  }
+  std::cerr << "[ane::runtime] " << message << "\n";
 }
 
 template <typename Fn>
 void runtime_log_lazy(Fn&& builder) {
-    std::cerr << "[ane::runtime] " << builder() << "\n";
+  if (!runtime_verbose_mode()) {
+    return;
+  }
+  std::cerr << "[ane::runtime] " << builder() << "\n";
 }
 
-#if DEBUG
 #define DRUNTIME_LOG(MESSAGE) runtime_log((MESSAGE))
 #define DRUNTIME_LOG_LAZY(BUILDER) runtime_log_lazy((BUILDER))
-#else
-#define DRUNTIME_LOG(MESSAGE) do {} while(0)
-#define DRUNTIME_LOG_LAZY(BUILDER) do {} while(0)
-#endif
+
+bool profile_mode() {
+  static bool enabled = env::get_var("MLX_ANE_PROFILE", 0) == 1;
+  return enabled;
+}
+
+bool metadata_fastpath_enabled() {
+  static bool enabled = env::get_var("MLX_ANE_METADATA_FASTPATH", 1) == 1;
+  return enabled;
+}
+
+int profile_every_dispatches() {
+  static int value = std::max(0, env::get_var("MLX_ANE_PROFILE_EVERY", 0));
+  return value;
+}
+
+using SteadyClock = std::chrono::steady_clock;
+
+uint64_t now_ns() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          SteadyClock::now().time_since_epoch())
+          .count());
+}
+
+double ns_to_ms(uint64_t ns) {
+  return static_cast<double>(ns) * 1e-6;
+}
+
+double bytes_to_mib(uint64_t bytes) {
+  return static_cast<double>(bytes) / (1024.0 * 1024.0);
+}
+
+struct RuntimeProfileCounters {
+  std::atomic<uint64_t> fastpath_calls{0};
+  std::atomic<uint64_t> fastpath_ns{0};
+  std::atomic<uint64_t> compile_calls{0};
+  std::atomic<uint64_t> compile_ns{0};
+  std::atomic<uint64_t> compile_model_ns{0};
+  std::atomic<uint64_t> compile_alloc_ns{0};
+  std::atomic<uint64_t> dispatch_calls{0};
+  std::atomic<uint64_t> dispatch_failures{0};
+  std::atomic<uint64_t> dispatch_ns{0};
+  std::atomic<uint64_t> pre_sync_ns{0};
+  std::atomic<uint64_t> input_copy_ns{0};
+  std::atomic<uint64_t> input_copy_bytes{0};
+  std::atomic<uint64_t> request_build_ns{0};
+  std::atomic<uint64_t> evaluate_ns{0};
+  std::atomic<uint64_t> output_copy_ns{0};
+  std::atomic<uint64_t> output_copy_bytes{0};
+  std::atomic<uint64_t> last_print_dispatches{0};
+};
+
+RuntimeProfileCounters& runtime_profile() {
+  static RuntimeProfileCounters counters;
+  return counters;
+}
+
+void print_profile_summary(const char* tag) {
+  if (!profile_mode()) {
+    return;
+  }
+  auto& p = runtime_profile();
+  const auto fastpath_calls = p.fastpath_calls.load(std::memory_order_relaxed);
+  const auto fastpath_ns = p.fastpath_ns.load(std::memory_order_relaxed);
+  const auto compile_calls = p.compile_calls.load(std::memory_order_relaxed);
+  const auto dispatch_calls = p.dispatch_calls.load(std::memory_order_relaxed);
+  const auto dispatch_failures = p.dispatch_failures.load(std::memory_order_relaxed);
+  const auto compile_ns = p.compile_ns.load(std::memory_order_relaxed);
+  const auto compile_model_ns = p.compile_model_ns.load(std::memory_order_relaxed);
+  const auto compile_alloc_ns = p.compile_alloc_ns.load(std::memory_order_relaxed);
+  const auto dispatch_ns = p.dispatch_ns.load(std::memory_order_relaxed);
+  const auto pre_sync_ns = p.pre_sync_ns.load(std::memory_order_relaxed);
+  const auto input_copy_ns = p.input_copy_ns.load(std::memory_order_relaxed);
+  const auto input_copy_bytes = p.input_copy_bytes.load(std::memory_order_relaxed);
+  const auto request_build_ns = p.request_build_ns.load(std::memory_order_relaxed);
+  const auto evaluate_ns = p.evaluate_ns.load(std::memory_order_relaxed);
+  const auto output_copy_ns = p.output_copy_ns.load(std::memory_order_relaxed);
+  const auto output_copy_bytes = p.output_copy_bytes.load(std::memory_order_relaxed);
+
+  std::cerr << "[ane::profile] tag=" << tag << " fastpath_calls=" << fastpath_calls
+            << " compile_calls=" << compile_calls
+            << " dispatch_calls=" << dispatch_calls
+            << " dispatch_failures=" << dispatch_failures
+            << " fastpath_ms=" << ns_to_ms(fastpath_ns)
+            << " compile_ms=" << ns_to_ms(compile_ns)
+            << " compile_model_ms=" << ns_to_ms(compile_model_ns)
+            << " compile_alloc_ms=" << ns_to_ms(compile_alloc_ns)
+            << " dispatch_ms=" << ns_to_ms(dispatch_ns)
+            << " pre_sync_ms=" << ns_to_ms(pre_sync_ns)
+            << " input_copy_ms=" << ns_to_ms(input_copy_ns)
+            << " input_copy_mib=" << bytes_to_mib(input_copy_bytes)
+            << " request_build_ms=" << ns_to_ms(request_build_ns)
+            << " evaluate_ms=" << ns_to_ms(evaluate_ns)
+            << " output_copy_ms=" << ns_to_ms(output_copy_ns)
+            << " output_copy_mib=" << bytes_to_mib(output_copy_bytes);
+  if (dispatch_calls > 0) {
+    std::cerr << " avg_dispatch_ms="
+              << (ns_to_ms(dispatch_ns) / static_cast<double>(dispatch_calls));
+  }
+  std::cerr << "\n";
+}
+
+void maybe_print_profile_periodic() {
+  if (!profile_mode()) {
+    return;
+  }
+  const int every = profile_every_dispatches();
+  if (every <= 0) {
+    return;
+  }
+  auto& p = runtime_profile();
+  const uint64_t current = p.dispatch_calls.load(std::memory_order_relaxed);
+  uint64_t last = p.last_print_dispatches.load(std::memory_order_relaxed);
+  if (current < static_cast<uint64_t>(every) || current - last < static_cast<uint64_t>(every)) {
+    return;
+  }
+  if (!p.last_print_dispatches.compare_exchange_strong(
+          last, current, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    return;
+  }
+  print_profile_summary("periodic");
+}
+
+void install_profile_exit_reporter() {
+  static bool installed = [] {
+    if (profile_mode()) {
+      std::atexit([]() { print_profile_summary("final"); });
+    }
+    return true;
+  }();
+  (void)installed;
+}
 
 static constexpr unsigned int kQoS = 21;
 static constexpr int kMLComputeUnitsAll = 2;
@@ -251,6 +394,15 @@ const char* mil_dtype(Dtype dtype) {
 
 bool io_layout_supported(const array& arr) {
   return arr.flags().row_contiguous;
+}
+
+bool is_metadata_fastpath_primitive(const Primitive& primitive) {
+  return typeid(primitive) == typeid(Reshape) ||
+      typeid(primitive) == typeid(ExpandDims) ||
+      typeid(primitive) == typeid(Squeeze) ||
+      typeid(primitive) == typeid(Transpose) ||
+      typeid(primitive) == typeid(Slice) ||
+      typeid(primitive) == typeid(Contiguous);
 }
 
 bool build_mil(
@@ -878,6 +1030,7 @@ bool compile_probe(RuntimeState& s, std::string& reason) {
 }
 
 bool initialize_locked(std::string* reason_out) {
+  install_profile_exit_reporter();
   auto& s = runtime_state();
   if (s.initialized) {
     if (reason_out) {
@@ -958,6 +1111,10 @@ struct Program {
   id __strong client{nil};
   id __strong model{nil};
   NSString* __strong model_dir{nil};
+  NSArray* __strong input_wrappers{nil};
+  NSArray* __strong input_indices{nil};
+  NSArray* __strong output_wrappers{nil};
+  NSArray* __strong output_indices{nil};
   std::vector<IOSurfaceRef> input_surfaces;
   std::vector<IOSurfaceRef> output_surfaces;
   std::vector<size_t> input_nbytes;
@@ -985,13 +1142,122 @@ struct Program {
   }
 };
 
+struct CompileProfileScope {
+  bool enabled{false};
+  uint64_t begin_ns{0};
+  uint64_t model_ns{0};
+  uint64_t alloc_ns{0};
+
+  CompileProfileScope() : enabled(profile_mode()) {
+    if (enabled) {
+      begin_ns = now_ns();
+    }
+  }
+
+  ~CompileProfileScope() {
+    if (!enabled) {
+      return;
+    }
+    auto& p = runtime_profile();
+    const uint64_t total = now_ns() - begin_ns;
+    p.compile_calls.fetch_add(1, std::memory_order_relaxed);
+    p.compile_ns.fetch_add(total, std::memory_order_relaxed);
+    p.compile_model_ns.fetch_add(model_ns, std::memory_order_relaxed);
+    p.compile_alloc_ns.fetch_add(alloc_ns, std::memory_order_relaxed);
+  }
+};
+
+struct DispatchProfileScope {
+  bool enabled{false};
+  uint64_t begin_ns{0};
+  uint64_t pre_sync_ns{0};
+  uint64_t input_copy_ns{0};
+  uint64_t input_copy_bytes{0};
+  uint64_t request_build_ns{0};
+  uint64_t evaluate_ns{0};
+  uint64_t output_copy_ns{0};
+  uint64_t output_copy_bytes{0};
+  bool success{false};
+
+  DispatchProfileScope() : enabled(profile_mode()) {
+    if (enabled) {
+      begin_ns = now_ns();
+    }
+  }
+
+  ~DispatchProfileScope() {
+    if (!enabled) {
+      return;
+    }
+    auto& p = runtime_profile();
+    const uint64_t total = now_ns() - begin_ns;
+    p.dispatch_calls.fetch_add(1, std::memory_order_relaxed);
+    if (!success) {
+      p.dispatch_failures.fetch_add(1, std::memory_order_relaxed);
+    }
+    p.dispatch_ns.fetch_add(total, std::memory_order_relaxed);
+    p.pre_sync_ns.fetch_add(pre_sync_ns, std::memory_order_relaxed);
+    p.input_copy_ns.fetch_add(input_copy_ns, std::memory_order_relaxed);
+    p.input_copy_bytes.fetch_add(input_copy_bytes, std::memory_order_relaxed);
+    p.request_build_ns.fetch_add(request_build_ns, std::memory_order_relaxed);
+    p.evaluate_ns.fetch_add(evaluate_ns, std::memory_order_relaxed);
+    p.output_copy_ns.fetch_add(output_copy_ns, std::memory_order_relaxed);
+    p.output_copy_bytes.fetch_add(output_copy_bytes, std::memory_order_relaxed);
+    maybe_print_profile_periodic();
+  }
+};
+
 bool available(std::string* reason) {
   std::lock_guard<std::mutex> lk(runtime_mutex());
   return initialize_locked(reason);
 }
 
+bool dispatch_fastpath(array& arr, std::string* reason) {
+  if (!metadata_fastpath_enabled()) {
+    return false;
+  }
+
+  auto& primitive = arr.primitive();
+  if (!is_metadata_fastpath_primitive(primitive)) {
+    return false;
+  }
+  auto* unary = dynamic_cast<UnaryPrimitive*>(&primitive);
+  if (unary == nullptr) {
+    if (reason) {
+      *reason = "metadata-fastpath-not-unary";
+    }
+    return false;
+  }
+
+  const uint64_t begin_ns = profile_mode() ? now_ns() : 0;
+  try {
+    unary->eval_cpu(arr.inputs(), arr);
+  } catch (const std::exception& e) {
+    if (reason) {
+      *reason = std::string("metadata-fastpath-failed:") + e.what();
+    }
+    return false;
+  } catch (...) {
+    if (reason) {
+      *reason = "metadata-fastpath-failed:unknown-exception";
+    }
+    return false;
+  }
+
+  if (profile_mode()) {
+    auto& p = runtime_profile();
+    p.fastpath_calls.fetch_add(1, std::memory_order_relaxed);
+    p.fastpath_ns.fetch_add(now_ns() - begin_ns, std::memory_order_relaxed);
+  }
+  if (reason) {
+    *reason = "metadata-fastpath";
+  }
+  return true;
+}
+
 std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
   std::lock_guard<std::mutex> lk(runtime_mutex());
+  CompileProfileScope profile_scope;
 
   std::string init_reason;
   if (!initialize_locked(&init_reason)) {
@@ -1014,6 +1280,10 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
   auto prog = std::make_shared<Program>();
   auto& s = runtime_state();
   prog->client = s.client;
+  uint64_t model_begin_ns = 0;
+  if (profile_scope.enabled) {
+    model_begin_ns = now_ns();
+  }
 
   std::string model_reason;
   NSString* model_dir = create_mil_model_dir(mil, model_reason);
@@ -1038,6 +1308,9 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
     }
     return nullptr;
   }
+  if (profile_scope.enabled) {
+    profile_scope.model_ns += now_ns() - model_begin_ns;
+  }
   DRUNTIME_LOG("compile step: model compiled+loaded");
 
   auto outputs = arr.outputs();
@@ -1045,6 +1318,10 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
   prog->output_nbytes.reserve(outputs.size());
   prog->input_surfaces.reserve(arr.inputs().size());
   prog->output_surfaces.reserve(outputs.size());
+  uint64_t alloc_begin_ns = 0;
+  if (profile_scope.enabled) {
+    alloc_begin_ns = now_ns();
+  }
 
   for (const auto& in : arr.inputs()) {
     prog->input_nbytes.push_back(in.nbytes());
@@ -1070,6 +1347,47 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
     prog->output_surfaces.push_back(surface);
   }
   DRUNTIME_LOG("compile step: output IOSurfaces allocated");
+  if (profile_scope.enabled) {
+    profile_scope.alloc_ns += now_ns() - alloc_begin_ns;
+  }
+
+  NSMutableArray* input_wrappers =
+      [NSMutableArray arrayWithCapacity:prog->input_surfaces.size()];
+  NSMutableArray* input_indices =
+      [NSMutableArray arrayWithCapacity:prog->input_surfaces.size()];
+  for (size_t i = 0; i < prog->input_surfaces.size(); ++i) {
+    id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
+        s.iosurface_cls, @selector(objectWithIOSurface:), prog->input_surfaces[i]);
+    if (wrapped == nil) {
+      if (reason) {
+        *reason = "compile-input-wrap-failed";
+      }
+      return nullptr;
+    }
+    [input_wrappers addObject:wrapped];
+    [input_indices addObject:@(i)];
+  }
+  prog->input_wrappers = [input_wrappers copy];
+  prog->input_indices = [input_indices copy];
+
+  NSMutableArray* output_wrappers =
+      [NSMutableArray arrayWithCapacity:prog->output_surfaces.size()];
+  NSMutableArray* output_indices =
+      [NSMutableArray arrayWithCapacity:prog->output_surfaces.size()];
+  for (size_t i = 0; i < prog->output_surfaces.size(); ++i) {
+    id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
+        s.iosurface_cls, @selector(objectWithIOSurface:), prog->output_surfaces[i]);
+    if (wrapped == nil) {
+      if (reason) {
+        *reason = "compile-output-wrap-failed";
+      }
+      return nullptr;
+    }
+    [output_wrappers addObject:wrapped];
+    [output_indices addObject:@(i)];
+  }
+  prog->output_wrappers = [output_wrappers copy];
+  prog->output_indices = [output_indices copy];
 
   if (reason) {
     *reason = "ok";
@@ -1079,6 +1397,7 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
 }
 
 bool dispatch(Program& program, array& arr, std::string* reason) {
+  DispatchProfileScope profile_scope;
   if (program.client == nil || program.model == nil) {
     if (reason) {
       *reason = "program-client-or-model-missing";
@@ -1099,12 +1418,36 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
     return false;
   }
+  if (
+      program.input_wrappers == nil || program.input_indices == nil ||
+      program.output_wrappers == nil || program.output_indices == nil) {
+    if (reason) {
+      *reason = "program-wrappers-missing";
+    }
+    return false;
+  }
 
   @autoreleasepool {
     DRUNTIME_LOG("dispatch start: staging inputs");
-    DRUNTIME_LOG("dispatch staging pre-sync begin");
-    gpu::synchronize(arr.primitive().stream());
-    DRUNTIME_LOG("dispatch staging pre-sync complete");
+    bool needs_sync = false;
+    for (const auto& in : inputs) {
+      if (!in.is_available()) {
+        needs_sync = true;
+        break;
+      }
+    }
+    if (needs_sync) {
+      DRUNTIME_LOG("dispatch staging pre-sync begin");
+      const uint64_t sync_begin_ns = profile_scope.enabled ? now_ns() : 0;
+      gpu::synchronize(arr.primitive().stream());
+      if (profile_scope.enabled) {
+        profile_scope.pre_sync_ns += now_ns() - sync_begin_ns;
+      }
+      DRUNTIME_LOG("dispatch staging pre-sync complete");
+    } else {
+      DRUNTIME_LOG("dispatch staging pre-sync skipped (all inputs available)");
+    }
+
     for (size_t i = 0; i < inputs.size(); ++i) {
       auto& in = inputs[i];
       DRUNTIME_LOG_LAZY([&]() {
@@ -1131,63 +1474,39 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         return false;
       }
       auto surface = program.input_surfaces[i];
+      const size_t copy_nbytes = std::min(in.nbytes(), program.input_nbytes[i]);
+      const uint64_t input_copy_begin_ns = profile_scope.enabled ? now_ns() : 0;
       IOSurfaceLock(surface, 0, nullptr);
       std::memcpy(
           IOSurfaceGetBaseAddress(surface),
           src,
-          std::min(in.nbytes(), program.input_nbytes[i]));
+          copy_nbytes);
       IOSurfaceUnlock(surface, 0, nullptr);
+      if (profile_scope.enabled) {
+        profile_scope.input_copy_ns += now_ns() - input_copy_begin_ns;
+        profile_scope.input_copy_bytes += copy_nbytes;
+      }
       DRUNTIME_LOG_LAZY(
           [&]() { return "dispatch stage input[" + std::to_string(i) + "] complete"; });
     }
     DRUNTIME_LOG("dispatch memcpy to IOSurfaces complete");
 
     auto& s = runtime_state();
-    NSMutableArray* input_objs =
-        [NSMutableArray arrayWithCapacity:program.input_surfaces.size()];
-    NSMutableArray* input_indices =
-        [NSMutableArray arrayWithCapacity:program.input_surfaces.size()];
-    for (size_t i = 0; i < program.input_surfaces.size(); ++i) {
-      id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
-          s.iosurface_cls, @selector(objectWithIOSurface:), program.input_surfaces[i]);
-      if (wrapped == nil) {
-        if (reason) {
-          *reason = "request-input-wrap-failed";
-        }
-        return false;
-      }
-      [input_objs addObject:wrapped];
-      [input_indices addObject:@(i)];
-    }
-
-    NSMutableArray* output_objs =
-        [NSMutableArray arrayWithCapacity:program.output_surfaces.size()];
-    NSMutableArray* output_indices =
-        [NSMutableArray arrayWithCapacity:program.output_surfaces.size()];
-    for (size_t i = 0; i < program.output_surfaces.size(); ++i) {
-      id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
-          s.iosurface_cls, @selector(objectWithIOSurface:), program.output_surfaces[i]);
-      if (wrapped == nil) {
-        if (reason) {
-          *reason = "request-output-wrap-failed";
-        }
-        return false;
-      }
-      [output_objs addObject:wrapped];
-      [output_indices addObject:@(i)];
-    }
-
     DRUNTIME_LOG("dispatch request build begin");
+    const uint64_t request_build_begin_ns = profile_scope.enabled ? now_ns() : 0;
     id request_obj = ((id(*)(Class, SEL, id, id, id, id, id, id, id))objc_msgSend)(
         s.request_cls,
         @selector(requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:),
-        input_objs,
-        input_indices,
-        output_objs,
-        output_indices,
+        program.input_wrappers,
+        program.input_indices,
+        program.output_wrappers,
+        program.output_indices,
         nil,
         nil,
         @0);
+    if (profile_scope.enabled) {
+      profile_scope.request_build_ns += now_ns() - request_build_begin_ns;
+    }
     if (request_obj == nil) {
       if (reason) {
         *reason = "request-create-failed";
@@ -1197,6 +1516,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
 
     NSError* e = nil;
     DRUNTIME_LOG("dispatch evaluate begin");
+    const uint64_t evaluate_begin_ns = profile_scope.enabled ? now_ns() : 0;
     BOOL ok = ((BOOL(*)(id, SEL, id, id, id, unsigned int, NSError**))objc_msgSend)(
         program.client,
         @selector(evaluateWithModel:options:request:qos:error:),
@@ -1205,6 +1525,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         request_obj,
         kQoS,
         &e);
+    if (profile_scope.enabled) {
+      profile_scope.evaluate_ns += now_ns() - evaluate_begin_ns;
+    }
     DRUNTIME_LOG(ok ? "dispatch evaluate end ok=1" : "dispatch evaluate end ok=0");
     if (!ok) {
       if (reason) {
@@ -1244,11 +1567,17 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       }
       return false;
     }
+    const size_t copy_nbytes = std::min(out.nbytes(), program.output_nbytes[i]);
+    const uint64_t output_copy_begin_ns = profile_scope.enabled ? now_ns() : 0;
     std::memcpy(
         dst,
         src,
-        std::min(out.nbytes(), program.output_nbytes[i]));
+        copy_nbytes);
     IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
+    if (profile_scope.enabled) {
+      profile_scope.output_copy_ns += now_ns() - output_copy_begin_ns;
+      profile_scope.output_copy_bytes += copy_nbytes;
+    }
     DRUNTIME_LOG_LAZY([&]() {
       return "dispatch output[" + std::to_string(i) + "] complete";
     });
@@ -1258,6 +1587,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
   if (reason) {
     *reason = "ok";
   }
+  profile_scope.success = true;
   return true;
 }
 
@@ -1284,6 +1614,13 @@ std::shared_ptr<Program> compile(const array&, std::string* reason) {
     *reason = "private-runtime-not-available-on-this-platform";
   }
   return nullptr;
+}
+
+bool dispatch_fastpath(array&, std::string* reason) {
+  if (reason) {
+    *reason = "private-runtime-not-available-on-this-platform";
+  }
+  return false;
 }
 
 bool dispatch(Program&, array&, std::string* reason) {

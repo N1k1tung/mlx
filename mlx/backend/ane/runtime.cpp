@@ -140,6 +140,13 @@ bool Runtime::should_use_iosurface() const {
 }
 
 DispatchResult Runtime::dispatch(array& arr) {
+  {
+    std::string fast_reason;
+    if (private_runtime::dispatch_fastpath(arr, &fast_reason)) {
+      return {DispatchStatus::dispatched, fast_reason};
+    }
+  }
+
   std::shared_ptr<CompiledProgram> program;
   {
     std::lock_guard<std::mutex> lk(mutex_);
