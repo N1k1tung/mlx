@@ -111,6 +111,16 @@ bool metadata_fastpath_enabled() {
   return enabled;
 }
 
+bool input_wait_mode_enabled() {
+  static bool enabled = env::get_var("MLX_ANE_WAIT_INPUTS", 0) == 1;
+  return enabled;
+}
+
+bool strict_input_ready_mode() {
+  static bool enabled = env::get_var("MLX_ANE_STRICT_INPUT_READY", 0) == 1;
+  return enabled;
+}
+
 int profile_every_dispatches() {
   static int value = std::max(0, env::get_var("MLX_ANE_PROFILE_EVERY", 0));
   return value;
@@ -1235,13 +1245,36 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
     }
   }
   if (needs_sync) {
-    gpu::synchronize(arr.primitive().stream());
-    for (size_t i = 0; i < inputs.size(); ++i) {
-      if (!inputs[i].is_available()) {
-        if (reason) {
-          *reason = "metadata-fastpath-input-not-available:" + std::to_string(i);
+    if (input_wait_mode_enabled()) {
+      for (size_t i = 0; i < inputs.size(); ++i) {
+        auto& in = inputs[i];
+        if (!in.is_available()) {
+          const_cast<array&>(in).wait();
+          if (!in.is_available()) {
+            if (reason) {
+              *reason = "metadata-fastpath-input-not-available-after-wait:" +
+                  std::to_string(i);
+            }
+            return false;
+          }
         }
-        return false;
+      }
+    } else {
+      gpu::synchronize(arr.primitive().stream());
+      for (size_t i = 0; i < inputs.size(); ++i) {
+        if (!inputs[i].is_available()) {
+          if (strict_input_ready_mode()) {
+            if (reason) {
+              *reason = "metadata-fastpath-input-not-available-after-sync:" +
+                  std::to_string(i);
+            }
+            return false;
+          }
+          DRUNTIME_LOG_LAZY([&]() {
+            return "metadata fastpath input[" + std::to_string(i) +
+                "] not-marked-available after sync; proceeding";
+          });
+        }
       }
     }
   }
@@ -1465,7 +1498,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         break;
       }
     }
-    if (needs_sync) {
+    if (needs_sync && !input_wait_mode_enabled()) {
       DRUNTIME_LOG("dispatch staging pre-sync begin");
       const uint64_t sync_begin_ns = profile_scope.enabled ? now_ns() : 0;
       gpu::synchronize(arr.primitive().stream());
@@ -1473,8 +1506,6 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         profile_scope.pre_sync_ns += now_ns() - sync_begin_ns;
       }
       DRUNTIME_LOG("dispatch staging pre-sync complete");
-    } else {
-      DRUNTIME_LOG("dispatch staging pre-sync skipped (all inputs available)");
     }
 
     for (size_t i = 0; i < inputs.size(); ++i) {
@@ -1490,9 +1521,26 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         return false;
       }
       if (!in.is_available()) {
+        if (input_wait_mode_enabled()) {
+          const uint64_t wait_begin_ns = profile_scope.enabled ? now_ns() : 0;
+          const_cast<array&>(in).wait();
+          if (profile_scope.enabled) {
+            profile_scope.pre_sync_ns += now_ns() - wait_begin_ns;
+          }
+        }
+      }
+      if (!in.is_available()) {
+        if (strict_input_ready_mode()) {
+          if (reason) {
+            *reason = input_wait_mode_enabled()
+                ? "input-not-available-after-wait:" + std::to_string(i)
+                : "input-not-available-after-sync:" + std::to_string(i);
+          }
+          return false;
+        }
         DRUNTIME_LOG_LAZY([&]() {
           return "dispatch stage input[" + std::to_string(i) +
-              "] not-marked-available after pre-sync; proceeding";
+              "] not-marked-available after readiness step; proceeding";
         });
       }
       auto* src = in.data<char>();
