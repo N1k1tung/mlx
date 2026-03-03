@@ -1217,6 +1217,35 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
     return false;
   }
 
+  auto inputs = arr.inputs();
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    if (inputs[i].status() == array::Status::unscheduled) {
+      if (reason) {
+        *reason = "metadata-fastpath-input-unscheduled:" + std::to_string(i);
+      }
+      return false;
+    }
+  }
+
+  bool needs_sync = false;
+  for (const auto& in : inputs) {
+    if (!in.is_available()) {
+      needs_sync = true;
+      break;
+    }
+  }
+  if (needs_sync) {
+    gpu::synchronize(arr.primitive().stream());
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      if (!inputs[i].is_available()) {
+        if (reason) {
+          *reason = "metadata-fastpath-input-not-available:" + std::to_string(i);
+        }
+        return false;
+      }
+    }
+  }
+
   auto& primitive = arr.primitive();
   if (!is_metadata_fastpath_primitive(primitive)) {
     return false;
