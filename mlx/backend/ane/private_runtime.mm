@@ -12,14 +12,12 @@
 #include <dlfcn.h>
 
 #include <algorithm>
-#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <mutex>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <typeinfo>
 #include <utility>
 #include <vector>
@@ -74,75 +72,27 @@ bool dump_mil_enabled() {
   return enabled;
 }
 
-bool runtime_verbose() {
-  static bool enabled =
-      debug_mode() || (env::get_var("MLX_ANE_VERBOSE", 0) == 1);
-  return enabled;
-}
-
-bool runtime_presync_stream() {
-  static bool enabled = env::get_var("MLX_ANE_PRESYNC_STREAM", 0) == 1;
-  return enabled;
-}
-
-int runtime_input_wait_ms() {
-  static int wait_ms = env::get_var("MLX_ANE_INPUT_WAIT_MS", 10);
-  return std::max(wait_ms, 0);
-}
-
-bool wait_until_available(const array& in, int timeout_ms) {
-  if (in.is_available()) {
-    return true;
-  }
-  if (timeout_ms <= 0) {
-    return false;
-  }
-  auto start = std::chrono::steady_clock::now();
-  while (true) {
-    if (in.is_available()) {
-      return true;
-    }
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start);
-    if (elapsed.count() >= timeout_ms) {
-      return false;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-}
-
-void runtime_log_if(bool enabled, std::string_view message) {
-  if (!enabled) {
-    return;
-  }
-  std::cerr << "[ane::runtime] " << message << "\n";
-}
-
-template <typename Fn>
-void runtime_log_lazy_if(bool enabled, Fn&& builder) {
-  if (!enabled) {
-    return;
-  }
-  runtime_log_if(true, builder());
-}
-
 void runtime_log(std::string_view message) {
-  runtime_log_if(runtime_verbose(), message);
+    std::cerr << "[ane::runtime] " << message << "\n";
 }
 
 template <typename Fn>
 void runtime_log_lazy(Fn&& builder) {
-  runtime_log_lazy_if(runtime_verbose(), std::forward<Fn>(builder));
+    std::cerr << "[ane::runtime] " << builder() << "\n";
 }
 
-#define DRUNTIME_LOG(VERBOSE, MESSAGE) runtime_log_if((VERBOSE), (MESSAGE))
-#define DRUNTIME_LOG_LAZY(VERBOSE, BUILDER) \
-  runtime_log_lazy_if((VERBOSE), (BUILDER))
+#if MLX_ANE_DEBUG
+#define DRUNTIME_LOG(MESSAGE) runtime_log((MESSAGE))
+#define DRUNTIME_LOG_LAZY(BUILDER) runtime_log_lazy((BUILDER))
+#else
+#define DRUNTIME_LOG(MESSAGE) do {} while(0)
+#define DRUNTIME_LOG_LAZY(BUILDER) do {} while(0)
+#endif
 
 static constexpr unsigned int kQoS = 21;
 static constexpr int kMLComputeUnitsAll = 2;
 static constexpr const char* kDefaultPrewarmModel =
-    "/System/Library/PrivateFrameworks/TuriCore.framework/Versions/A/Resources/resnet-16.mlmodel";
+    "/System/Library/PrivateFrameworks/TuriCore.framework/Versions/A/Resources/maml-video-light.mlmodel";
 
 NSDictionary* mil_compile_options() {
   return @{
@@ -451,7 +401,7 @@ bool compile_load_model_with_options(
       &e);
   if (!ok) {
     reason = "compile-failed:" + error_to_string(e, "no-error");
-    runtime_log(reason);
+    DRUNTIME_LOG(reason);
     return false;
   }
 
@@ -460,10 +410,10 @@ bool compile_load_model_with_options(
       s.client, @selector(loadModel:options:qos:error:), model, @{}, kQoS, &e);
   if (!ok) {
     reason = "load-failed:" + error_to_string(e, "no-error");
-    runtime_log(reason);
+    DRUNTIME_LOG(reason);
     return false;
   }
-  runtime_log("compile+load ok");
+  DRUNTIME_LOG("compile+load ok");
   reason = "ok";
   return true;
 }
@@ -550,7 +500,7 @@ bool prewarm_client(RuntimeState& s, std::string& reason) {
   }
   reason = ok ? std::string("ok")
               : std::string("prewarm-ane-compile-load-failed:") + local_reason;
-  runtime_log_lazy([&]() { return std::string("prewarm result: ") + reason; });
+  DRUNTIME_LOG_LAZY([&]() { return std::string("prewarm result: ") + reason; });
   return ok;
 }
 
@@ -649,7 +599,7 @@ bool initialize_locked(std::string* reason_out) {
     }
     return false;
   }
-  runtime_log("prewarm complete");
+  DRUNTIME_LOG("prewarm complete");
 
   if (require_probe()) {
     std::string probe_reason;
@@ -664,7 +614,7 @@ bool initialize_locked(std::string* reason_out) {
 
   s.available = true;
   s.reason = "ok";
-  runtime_log("runtime initialized: available");
+  DRUNTIME_LOG("runtime initialized: available");
   if (reason_out) {
     *reason_out = s.reason;
   }
@@ -757,7 +707,7 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
     }
     return nullptr;
   }
-  runtime_log("compile step: model compiled+loaded");
+  DRUNTIME_LOG("compile step: model compiled+loaded");
 
   auto outputs = arr.outputs();
   prog->input_nbytes.reserve(arr.inputs().size());
@@ -776,7 +726,7 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
     }
     prog->input_surfaces.push_back(surface);
   }
-  runtime_log("compile step: input IOSurfaces allocated");
+  DRUNTIME_LOG("compile step: input IOSurfaces allocated");
   for (const auto& out : outputs) {
     prog->output_nbytes.push_back(out.nbytes());
     auto surface = create_surface(out.nbytes());
@@ -788,12 +738,12 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
     }
     prog->output_surfaces.push_back(surface);
   }
-  runtime_log("compile step: output IOSurfaces allocated");
+  DRUNTIME_LOG("compile step: output IOSurfaces allocated");
 
   if (reason) {
     *reason = "ok";
   }
-  runtime_log("compile step: program ready");
+  DRUNTIME_LOG("compile step: program ready");
   return prog;
 }
 
@@ -818,26 +768,15 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
     return false;
   }
-  const bool verbose = runtime_verbose();
-  const int input_wait_ms = runtime_input_wait_ms();
 
   @autoreleasepool {
-    DRUNTIME_LOG(verbose, "dispatch start: staging inputs");
-    if (runtime_presync_stream()) {
-      DRUNTIME_LOG(verbose, "dispatch staging pre-sync begin");
-      try {
-        gpu::synchronize(arr.primitive().stream());
-      } catch (const std::exception& e) {
-        if (reason) {
-          *reason = std::string("dispatch-presync-failed:") + e.what();
-        }
-        return false;
-      }
-      DRUNTIME_LOG(verbose, "dispatch staging pre-sync complete");
-    }
+    DRUNTIME_LOG("dispatch start: staging inputs");
+    DRUNTIME_LOG("dispatch staging pre-sync begin");
+    gpu::synchronize(arr.primitive().stream());
+    DRUNTIME_LOG("dispatch staging pre-sync complete");
     for (size_t i = 0; i < inputs.size(); ++i) {
       auto& in = inputs[i];
-      DRUNTIME_LOG_LAZY(verbose, [&]() {
+      DRUNTIME_LOG_LAZY([&]() {
         return "dispatch stage input[" + std::to_string(i) +
             "] begin status=" + std::to_string(static_cast<int>(in.status()));
       });
@@ -848,18 +787,10 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         return false;
       }
       if (!in.is_available()) {
-        if (!wait_until_available(in, input_wait_ms)) {
-          if (reason) {
-            *reason = "input-not-available-at-dispatch:" + std::to_string(i);
-          }
-          return false;
-        }
-        DRUNTIME_LOG_LAZY(
-            verbose,
-            [&]() {
-              return "dispatch stage input[" + std::to_string(i) +
-                  "] became-available-after-poll";
-            });
+        DRUNTIME_LOG_LAZY([&]() {
+          return "dispatch stage input[" + std::to_string(i) +
+              "] not-marked-available after pre-sync; proceeding";
+        });
       }
       auto* src = in.data<char>();
       if (src == nullptr) {
@@ -876,10 +807,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
           std::min(in.nbytes(), program.input_nbytes[i]));
       IOSurfaceUnlock(surface, 0, nullptr);
       DRUNTIME_LOG_LAZY(
-          verbose,
           [&]() { return "dispatch stage input[" + std::to_string(i) + "] complete"; });
     }
-    DRUNTIME_LOG(verbose, "dispatch memcpy to IOSurfaces complete");
+    DRUNTIME_LOG("dispatch memcpy to IOSurfaces complete");
 
     auto& s = runtime_state();
     NSMutableArray* input_objs =
@@ -916,7 +846,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       [output_indices addObject:@(i)];
     }
 
-    DRUNTIME_LOG(verbose, "dispatch request build begin");
+    DRUNTIME_LOG("dispatch request build begin");
     id request_obj = ((id(*)(Class, SEL, id, id, id, id, id, id, id))objc_msgSend)(
         s.request_cls,
         @selector(requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:),
@@ -935,7 +865,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
 
     NSError* e = nil;
-    DRUNTIME_LOG(verbose, "dispatch evaluate begin");
+    DRUNTIME_LOG("dispatch evaluate begin");
     BOOL ok = ((BOOL(*)(id, SEL, id, id, id, unsigned int, NSError**))objc_msgSend)(
         program.client,
         @selector(evaluateWithModel:options:request:qos:error:),
@@ -944,7 +874,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         request_obj,
         kQoS,
         &e);
-    DRUNTIME_LOG(verbose, ok ? "dispatch evaluate end ok=1" : "dispatch evaluate end ok=0");
+    DRUNTIME_LOG(ok ? "dispatch evaluate end ok=1" : "dispatch evaluate end ok=0");
     if (!ok) {
       if (reason) {
         *reason = e ? std::string([[e description] UTF8String])
@@ -957,7 +887,6 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
   for (size_t i = 0; i < outputs.size(); ++i) {
     auto& out = outputs[i];
     DRUNTIME_LOG_LAZY(
-        verbose,
         [&]() { return "dispatch output[" + std::to_string(i) + "] begin"; });
     auto data_ref = out.data_shared_ptr();
     bool need_alloc = (data_ref == nullptr || data_ref->buffer.ptr() == nullptr);
@@ -989,11 +918,11 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         src,
         std::min(out.nbytes(), program.output_nbytes[i]));
     IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
-    DRUNTIME_LOG_LAZY(verbose, [&]() {
+    DRUNTIME_LOG_LAZY([&]() {
       return "dispatch output[" + std::to_string(i) + "] complete";
     });
   }
-  DRUNTIME_LOG(verbose, "dispatch output copy complete");
+  DRUNTIME_LOG("dispatch output copy complete");
 
   if (reason) {
     *reason = "ok";
