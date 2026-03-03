@@ -12,9 +12,11 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -81,7 +83,7 @@ void runtime_log_lazy(Fn&& builder) {
     std::cerr << "[ane::runtime] " << builder() << "\n";
 }
 
-#if MLX_ANE_DEBUG
+#if DEBUG
 #define DRUNTIME_LOG(MESSAGE) runtime_log((MESSAGE))
 #define DRUNTIME_LOG_LAZY(BUILDER) runtime_log_lazy((BUILDER))
 #else
@@ -151,24 +153,89 @@ bool normalize_shape_for_mil(
     const Shape& in_shape,
     Shape& out_shape,
     std::string& reason) {
-  if (in_shape.size() > 4) {
-    reason = "unsupported-rank>4";
-    return false;
-  }
   out_shape.clear();
-  out_shape.reserve(std::max<size_t>(4, in_shape.size()));
-  for (size_t i = in_shape.size(); i < 4; ++i) {
-    out_shape.push_back(1);
+  if (in_shape.size() <= 4) {
+    out_shape.reserve(4);
+    for (size_t i = in_shape.size(); i < 4; ++i) {
+      out_shape.push_back(1);
+    }
+    for (auto d : in_shape) {
+      out_shape.push_back(d);
+    }
+    return true;
   }
-  for (auto d : in_shape) {
-    out_shape.push_back(d);
+
+  // ANE MIL paths in this runtime are 4D-oriented. For higher ranks, collapse
+  // the leading dimensions into a single batch dimension and preserve the last
+  // three dimensions.
+  int64_t collapsed = 1;
+  for (size_t i = 0; i + 3 < in_shape.size(); ++i) {
+    if (in_shape[i] <= 0) {
+      reason = "unsupported-nonpositive-dim";
+      return false;
+    }
+    if (collapsed > std::numeric_limits<int64_t>::max() / in_shape[i]) {
+      reason = "unsupported-rank-collapse-overflow";
+      return false;
+    }
+    collapsed *= in_shape[i];
   }
+  out_shape.reserve(4);
+  out_shape.push_back(collapsed);
+  out_shape.push_back(in_shape[in_shape.size() - 3]);
+  out_shape.push_back(in_shape[in_shape.size() - 2]);
+  out_shape.push_back(in_shape[in_shape.size() - 1]);
   return true;
 }
 
+bool normalize_axis(int axis, int rank, int& out_axis) {
+  if (rank <= 0) {
+    return false;
+  }
+  int ax = axis;
+  if (ax < 0) {
+    ax += rank;
+  }
+  if (ax < 0 || ax >= rank) {
+    return false;
+  }
+  out_axis = ax;
+  return true;
+}
+
+bool axis_to_mil_axis(
+    const Shape& original_shape,
+    int axis,
+    int& mil_axis,
+    std::string& reason) {
+  int rank = static_cast<int>(original_shape.size());
+  int normalized_axis = 0;
+  if (!normalize_axis(axis, rank, normalized_axis)) {
+    reason = "invalid-axis";
+    return false;
+  }
+  if (rank <= 4) {
+    mil_axis = normalized_axis + static_cast<int>(4 - rank);
+    return true;
+  }
+  // Collapsed shape is [prod(leading), d[-3], d[-2], d[-1]].
+  if (normalized_axis <= rank - 4) {
+    reason = "axis-in-collapsed-leading-dims";
+    return false;
+  }
+  mil_axis = normalized_axis - (rank - 4);
+  return true;
+}
+
+std::string int32_tensor_literal(const std::array<int32_t, 4>& values) {
+  std::ostringstream os;
+  os << "tensor<int32, [4]>([" << values[0] << ", " << values[1] << ", " << values[2]
+     << ", " << values[3] << "])";
+  return os.str();
+}
+
 bool dtype_supported(Dtype dtype) {
-  // Keep runtime path conservative and deterministic for now.
-  return dtype == float16;
+  return dtype == float16 || dtype == float32;
 }
 
 const char* mil_dtype(Dtype dtype) {
@@ -259,6 +326,60 @@ bool build_mil(
     return true;
   };
 
+  auto emit_unary = [&](const char* op_name) -> bool {
+    if (inputs.size() != 1) {
+      reason = "unary-op-arity-mismatch";
+      return false;
+    }
+    auto in0_dtype = mil_dtype(inputs[0].dtype());
+    if (in0_dtype == nullptr) {
+      reason = "unsupported-input-dtype-token";
+      return false;
+    }
+    std::ostringstream os;
+    os << "program(1.3)\n" << kBuildInfo
+       << "{\n"
+       << "    func main<ios18>(tensor<" << in0_dtype << ", "
+       << shape_to_mil(input_shapes_mil[0]) << "> x) {\n"
+       << "        tensor<" << out_dtype << ", " << shape_to_mil(out_shape_mil)
+       << "> out = " << op_name << "(x = x)[name = string(\"ane_op\")];\n"
+       << "    } -> (out);\n"
+       << "}\n";
+    mil = os.str();
+    return true;
+  };
+
+  auto emit_reshape_alias = [&](const char* tag) -> bool {
+    if (inputs.size() != 1) {
+      reason = std::string(tag) + "-arity-mismatch";
+      return false;
+    }
+    auto in0_dtype = mil_dtype(inputs[0].dtype());
+    if (in0_dtype == nullptr) {
+      reason = "unsupported-input-dtype-token";
+      return false;
+    }
+    std::array<int32_t, 4> sh = {
+        static_cast<int32_t>(out_shape_mil[0]),
+        static_cast<int32_t>(out_shape_mil[1]),
+        static_cast<int32_t>(out_shape_mil[2]),
+        static_cast<int32_t>(out_shape_mil[3]),
+    };
+    std::ostringstream os;
+    os << "program(1.3)\n" << kBuildInfo
+       << "{\n"
+       << "    func main<ios18>(tensor<" << in0_dtype << ", "
+       << shape_to_mil(input_shapes_mil[0]) << "> x) {\n"
+       << "        tensor<int32, [4]> sh = const()[name = string(\"sh\"), val = "
+       << int32_tensor_literal(sh) << "];\n"
+       << "        tensor<" << out_dtype << ", " << shape_to_mil(out_shape_mil)
+       << "> out = reshape(shape = sh, x = x)[name = string(\"ane_op\")];\n"
+       << "    } -> (out);\n"
+       << "}\n";
+    mil = os.str();
+    return true;
+  };
+
   if (typeid(primitive) == typeid(Add)) {
     return emit_binary("add");
   }
@@ -271,6 +392,216 @@ bool build_mil(
   if (typeid(primitive) == typeid(Divide)) {
     return emit_binary("real_div");
   }
+  if (typeid(primitive) == typeid(Sigmoid)) {
+    return emit_unary("sigmoid");
+  }
+
+  if (
+      typeid(primitive) == typeid(Reshape) ||
+      typeid(primitive) == typeid(ExpandDims) ||
+      typeid(primitive) == typeid(Squeeze) ||
+      typeid(primitive) == typeid(Contiguous)) {
+    return emit_reshape_alias("reshape-alias");
+  }
+
+  if (const auto* cast_prim = dynamic_cast<const AsType*>(&primitive);
+      cast_prim != nullptr) {
+    if (inputs.size() != 1) {
+      reason = "astype-arity-mismatch";
+      return false;
+    }
+    auto in0_dtype = mil_dtype(inputs[0].dtype());
+    auto cast_dtype = mil_dtype(cast_prim->state());
+    if (in0_dtype == nullptr || cast_dtype == nullptr) {
+      reason = "unsupported-astype-dtype";
+      return false;
+    }
+    std::ostringstream os;
+    os << "program(1.3)\n" << kBuildInfo
+       << "{\n"
+       << "    func main<ios18>(tensor<" << in0_dtype << ", "
+       << shape_to_mil(input_shapes_mil[0]) << "> x) {\n"
+       << "        string cast_t = const()[name = string(\"cast_t\"), val = string(\""
+       << cast_dtype << "\")];\n"
+       << "        tensor<" << out_dtype << ", " << shape_to_mil(out_shape_mil)
+       << "> out = cast(dtype = cast_t, x = x)[name = string(\"ane_op\")];\n"
+       << "    } -> (out);\n"
+       << "}\n";
+    mil = os.str();
+    return true;
+  }
+
+  if (const auto* transpose_prim = dynamic_cast<const Transpose*>(&primitive);
+      transpose_prim != nullptr) {
+    if (inputs.size() != 1) {
+      reason = "transpose-arity-mismatch";
+      return false;
+    }
+    const auto& in_shape = inputs[0].shape();
+    if (in_shape.size() > 4) {
+      reason = "transpose-rank>4";
+      return false;
+    }
+    auto axes = transpose_prim->state();
+    if (axes.size() != in_shape.size()) {
+      reason = "transpose-axes-rank-mismatch";
+      return false;
+    }
+    std::array<int32_t, 4> perm = {0, 1, 2, 3};
+    std::array<bool, 4> used = {false, false, false, false};
+    size_t shift = 4 - in_shape.size();
+    for (size_t i = 0; i < shift; ++i) {
+      used[i] = true;
+    }
+    for (size_t i = 0; i < axes.size(); ++i) {
+      int normalized_axis = 0;
+      if (!normalize_axis(axes[i], static_cast<int>(in_shape.size()), normalized_axis)) {
+        reason = "transpose-invalid-axis";
+        return false;
+      }
+      int mapped = normalized_axis + static_cast<int>(shift);
+      if (used[mapped]) {
+        reason = "transpose-duplicate-axis";
+        return false;
+      }
+      used[mapped] = true;
+      perm[shift + i] = mapped;
+    }
+    auto in0_dtype = mil_dtype(inputs[0].dtype());
+    if (in0_dtype == nullptr) {
+      reason = "unsupported-input-dtype-token";
+      return false;
+    }
+    std::ostringstream os;
+    os << "program(1.3)\n" << kBuildInfo
+       << "{\n"
+       << "    func main<ios18>(tensor<" << in0_dtype << ", "
+       << shape_to_mil(input_shapes_mil[0]) << "> x) {\n"
+       << "        tensor<int32, [4]> pm = const()[name = string(\"pm\"), val = "
+       << int32_tensor_literal(perm) << "];\n"
+       << "        tensor<" << out_dtype << ", " << shape_to_mil(out_shape_mil)
+       << "> out = transpose(perm = pm, x = x)[name = string(\"ane_op\")];\n"
+       << "    } -> (out);\n"
+       << "}\n";
+    mil = os.str();
+    return true;
+  }
+
+  if (const auto* concat_prim = dynamic_cast<const Concatenate*>(&primitive);
+      concat_prim != nullptr) {
+    if (inputs.size() < 2) {
+      reason = "concat-input-count<2";
+      return false;
+    }
+    int axis = concat_prim->state();
+    int mil_axis = 0;
+    if (!axis_to_mil_axis(inputs[0].shape(), axis, mil_axis, reason)) {
+      return false;
+    }
+    auto in0_dtype = mil_dtype(inputs[0].dtype());
+    if (in0_dtype == nullptr) {
+      reason = "unsupported-input-dtype-token";
+      return false;
+    }
+    std::ostringstream sig;
+    std::ostringstream values;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      auto in_dtype = mil_dtype(inputs[i].dtype());
+      if (in_dtype == nullptr || std::string_view(in_dtype) != std::string_view(in0_dtype)) {
+        reason = "concat-input-dtype-mismatch";
+        return false;
+      }
+      if (i > 0) {
+        sig << ", ";
+        values << ", ";
+      }
+      sig << "tensor<" << in_dtype << ", " << shape_to_mil(input_shapes_mil[i])
+          << "> x" << i;
+      values << "x" << i;
+    }
+    std::ostringstream os;
+    os << "program(1.3)\n" << kBuildInfo
+       << "{\n"
+       << "    func main<ios18>(" << sig.str() << ") {\n"
+       << "        int32 ax = const()[name = string(\"ax\"), val = int32(" << mil_axis
+       << ")];\n"
+       << "        bool inter = const()[name = string(\"inter\"), val = bool(false)];\n"
+       << "        tensor<" << out_dtype << ", " << shape_to_mil(out_shape_mil)
+       << "> out = concat(axis = ax, interleave = inter, values = (" << values.str()
+       << "))[name = string(\"ane_op\")];\n"
+       << "    } -> (out);\n"
+       << "}\n";
+    mil = os.str();
+    return true;
+  }
+
+  if (const auto* slice_prim = dynamic_cast<const Slice*>(&primitive);
+      slice_prim != nullptr) {
+    if (inputs.size() != 1) {
+      reason = "slice-arity-mismatch";
+      return false;
+    }
+    const auto& in_shape = inputs[0].shape();
+    if (in_shape.size() > 4) {
+      reason = "slice-rank>4";
+      return false;
+    }
+    auto [start_indices, end_indices, strides] = slice_prim->state();
+    if (
+        start_indices.size() != in_shape.size() ||
+        end_indices.size() != in_shape.size() ||
+        strides.size() != in_shape.size()) {
+      reason = "slice-index-rank-mismatch";
+      return false;
+    }
+    std::array<int32_t, 4> begin = {0, 0, 0, 0};
+    std::array<int32_t, 4> size = {1, 1, 1, 1};
+    size_t shift = 4 - in_shape.size();
+    for (size_t i = 0; i < in_shape.size(); ++i) {
+      if (strides[i] != 1) {
+        reason = "slice-unsupported-stride";
+        return false;
+      }
+      int64_t dim = in_shape[i];
+      int64_t s = start_indices[i];
+      int64_t e = end_indices[i];
+      if (s < 0) {
+        s += dim;
+      }
+      if (e < 0) {
+        e += dim;
+      }
+      s = std::max<int64_t>(0, std::min<int64_t>(s, dim));
+      e = std::max<int64_t>(0, std::min<int64_t>(e, dim));
+      if (e < s) {
+        reason = "slice-invalid-range";
+        return false;
+      }
+      begin[shift + i] = static_cast<int32_t>(s);
+      size[shift + i] = static_cast<int32_t>(e - s);
+    }
+    auto in0_dtype = mil_dtype(inputs[0].dtype());
+    if (in0_dtype == nullptr) {
+      reason = "unsupported-input-dtype-token";
+      return false;
+    }
+    std::ostringstream os;
+    os << "program(1.3)\n" << kBuildInfo
+       << "{\n"
+       << "    func main<ios18>(tensor<" << in0_dtype << ", "
+       << shape_to_mil(input_shapes_mil[0]) << "> x) {\n"
+       << "        tensor<int32, [4]> b = const()[name = string(\"b\"), val = "
+       << int32_tensor_literal(begin) << "];\n"
+       << "        tensor<int32, [4]> sz = const()[name = string(\"sz\"), val = "
+       << int32_tensor_literal(size) << "];\n"
+       << "        tensor<" << out_dtype << ", " << shape_to_mil(out_shape_mil)
+       << "> out = slice_by_size(x = x, begin = b, size = sz)[name = string(\"ane_op\")];\n"
+       << "    } -> (out);\n"
+       << "}\n";
+    mil = os.str();
+    return true;
+  }
+
   if (typeid(primitive) == typeid(Matmul)) {
     if (inputs.size() != 2) {
       reason = "matmul-arity-mismatch";
