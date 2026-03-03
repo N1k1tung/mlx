@@ -98,8 +98,13 @@ void runtime_log_lazy(Fn&& builder) {
   std::cerr << "[ane::runtime] " << builder() << "\n";
 }
 
+#if DEBUG_ANE
 #define DRUNTIME_LOG(MESSAGE) runtime_log((MESSAGE))
 #define DRUNTIME_LOG_LAZY(BUILDER) runtime_log_lazy((BUILDER))
+#else
+#define DRUNTIME_LOG(MESSAGE) do {} while(0)
+#define DRUNTIME_LOG_LAZY(BUILDER) do {} while(0)
+#endif
 
 inline bool profile_mode() {
   static bool enabled = env::get_var("MLX_ANE_PROFILE", 0) == 1;
