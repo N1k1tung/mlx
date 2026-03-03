@@ -101,27 +101,27 @@ void runtime_log_lazy(Fn&& builder) {
 #define DRUNTIME_LOG(MESSAGE) runtime_log((MESSAGE))
 #define DRUNTIME_LOG_LAZY(BUILDER) runtime_log_lazy((BUILDER))
 
-bool profile_mode() {
+inline bool profile_mode() {
   static bool enabled = env::get_var("MLX_ANE_PROFILE", 0) == 1;
   return enabled;
 }
 
-bool metadata_fastpath_enabled() {
+inline bool metadata_fastpath_enabled() {
   static bool enabled = env::get_var("MLX_ANE_METADATA_FASTPATH", 1) == 1;
   return enabled;
 }
 
-bool input_wait_mode_enabled() {
+inline bool input_wait_mode_enabled() {
   static bool enabled = env::get_var("MLX_ANE_WAIT_INPUTS", 0) == 1;
   return enabled;
 }
 
-bool strict_input_ready_mode() {
+inline bool strict_input_ready_mode() {
   static bool enabled = env::get_var("MLX_ANE_STRICT_INPUT_READY", 0) == 1;
   return enabled;
 }
 
-int profile_every_dispatches() {
+inline int profile_every_dispatches() {
   static int value = std::max(0, env::get_var("MLX_ANE_PROFILE_EVERY", 0));
   return value;
 }
@@ -256,7 +256,7 @@ NSDictionary* mil_compile_options() {
   };
 }
 
-bool prewarm_enabled() {
+inline bool prewarm_enabled() {
   static bool enabled = env::get_var("MLX_ANE_PREWARM", 1) == 1;
   return enabled;
 }
@@ -900,7 +900,7 @@ bool compile_load_model_with_options(
 
   e = nil;
   ok = ((BOOL(*)(id, SEL, id, id, unsigned int, NSError**))objc_msgSend)(
-      s.client, @selector(loadModel:options:qos:error:), model, @{}, kQoS, &e);
+      s.client, @selector(loadModel:options:qos:error:), model, nil, kQoS, &e);
   if (!ok) {
     reason = "load-failed:" + error_to_string(e, "no-error");
     DRUNTIME_LOG(reason);
@@ -1003,7 +1003,7 @@ void unload_model(RuntimeState& s, id model) {
   }
   NSError* e = nil;
   (void)((BOOL(*)(id, SEL, id, id, unsigned int, NSError**))objc_msgSend)(
-      s.client, @selector(unloadModel:options:qos:error:), model, @{}, kQoS, &e);
+      s.client, @selector(unloadModel:options:qos:error:), model, nil, kQoS, &e);
 }
 
 bool compile_probe(RuntimeState& s, std::string& reason) {
@@ -1134,7 +1134,7 @@ struct Program {
     if (client != nil && model != nil) {
       NSError* e = nil;
       (void)((BOOL(*)(id, SEL, id, id, unsigned int, NSError**))objc_msgSend)(
-          client, @selector(unloadModel:options:qos:error:), model, @{}, kQoS, &e);
+          client, @selector(unloadModel:options:qos:error:), model, nil, kQoS, &e);
     }
     for (auto s : input_surfaces) {
       if (s != nullptr) {
@@ -1598,7 +1598,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         program.client,
         @selector(evaluateWithModel:options:request:qos:error:),
         program.model,
-        @{},
+        nil,
         request_obj,
         kQoS,
         &e);
