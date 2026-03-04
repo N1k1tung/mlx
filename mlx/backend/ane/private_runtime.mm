@@ -550,7 +550,9 @@ bool build_mil(
       typeid(primitive) == typeid(Reshape) ||
       typeid(primitive) == typeid(ExpandDims) ||
       typeid(primitive) == typeid(Squeeze) ||
-      typeid(primitive) == typeid(Contiguous)) {
+      typeid(primitive) == typeid(Contiguous) ||
+      typeid(primitive) == typeid(Flatten) ||
+      typeid(primitive) == typeid(Unflatten)) {
     return emit_reshape_alias("reshape-alias");
   }
 

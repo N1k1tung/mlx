@@ -15,7 +15,9 @@ bool is_metadata_fastpath_primitive(const Primitive& p) {
       typeid(p) == typeid(Squeeze) ||
       typeid(p) == typeid(Transpose) ||
       typeid(p) == typeid(Slice) ||
-      typeid(p) == typeid(Contiguous);
+      typeid(p) == typeid(Contiguous) ||
+      typeid(p) == typeid(Flatten) ||
+      typeid(p) == typeid(Unflatten);
 }
 
 bool supports_ane(const Primitive& p) {
@@ -27,7 +29,8 @@ bool supports_ane(const Primitive& p) {
       typeid(p) == typeid(ExpandDims) || typeid(p) == typeid(Squeeze) ||
       typeid(p) == typeid(Transpose) || typeid(p) == typeid(Concatenate) ||
       typeid(p) == typeid(Slice) || typeid(p) == typeid(Sigmoid) ||
-      typeid(p) == typeid(Contiguous) || typeid(p) == typeid(fast::RMSNorm);
+      typeid(p) == typeid(Contiguous) || typeid(p) == typeid(Flatten) ||
+      typeid(p) == typeid(Unflatten) || typeid(p) == typeid(fast::RMSNorm);
 }
 
 } // namespace mlx::core::ane
