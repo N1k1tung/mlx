@@ -93,13 +93,28 @@ std::string Runtime::make_cache_key(const array& arr) const {
 std::shared_ptr<Runtime::CompiledProgram> Runtime::get_or_compile(
     const array& arr) {
   const bool diagnostics = diagnostics_mode();
-  auto key = make_cache_key(arr);
   auto& primitive = arr.primitive();
+  const auto primitive_id = arr.primitive_id();
+
+  auto pit = primitive_cache_.find(primitive_id);
+  if (pit != primitive_cache_.end()) {
+    const auto& cached = pit->second;
+    if (cached != nullptr && program_matches(*cached, arr)) {
+      if (diagnostics) {
+        note_compile_cache_hit(primitive);
+      }
+      return cached;
+    }
+    primitive_cache_.erase(pit);
+  }
+
+  auto key = make_cache_key(arr);
   auto it = compile_cache_.find(key);
   if (it != compile_cache_.end()) {
     if (diagnostics) {
       note_compile_cache_hit(primitive);
     }
+    primitive_cache_[primitive_id] = it->second;
     return it->second;
   }
   if (diagnostics) {
@@ -108,8 +123,26 @@ std::shared_ptr<Runtime::CompiledProgram> Runtime::get_or_compile(
   auto program = std::make_shared<CompiledProgram>();
   program->key = key;
   program->primitive = primitive.name();
+  program->primitive_id = primitive_id;
   program->num_inputs = arr.inputs().size();
   program->num_outputs = arr.outputs().size();
+  program->input_shapes.reserve(arr.inputs().size());
+  program->input_dtypes.reserve(arr.inputs().size());
+  for (const auto& in : arr.inputs()) {
+    program->input_shapes.push_back(in.shape());
+    program->input_dtypes.push_back(in.dtype());
+  }
+  auto outputs = arr.outputs();
+  program->output_shapes.reserve(outputs.size());
+  program->output_dtypes.reserve(outputs.size());
+  for (const auto& out : outputs) {
+    program->output_shapes.push_back(out.shape());
+    program->output_dtypes.push_back(out.dtype());
+  }
+  if (const auto* rms = dynamic_cast<const fast::RMSNorm*>(&primitive); rms != nullptr) {
+    program->has_rms_eps = true;
+    program->rms_eps = rms->state().second;
+  }
   if (runtime_available_) {
     std::string reason;
     program->native_program = private_runtime::compile(arr, &reason);
@@ -118,7 +151,43 @@ std::shared_ptr<Runtime::CompiledProgram> Runtime::get_or_compile(
     program->native_compile_reason = runtime_unavailable_reason_;
   }
   compile_cache_.emplace(key, program);
+  primitive_cache_[primitive_id] = program;
   return program;
+}
+
+bool Runtime::program_matches(const CompiledProgram& program, const array& arr) const {
+  if (program.num_inputs != arr.inputs().size() ||
+      program.num_outputs != arr.outputs().size()) {
+    return false;
+  }
+  if (program.input_shapes.size() != arr.inputs().size() ||
+      program.input_dtypes.size() != arr.inputs().size()) {
+    return false;
+  }
+  auto outputs = arr.outputs();
+  if (program.output_shapes.size() != outputs.size() ||
+      program.output_dtypes.size() != outputs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < arr.inputs().size(); ++i) {
+    if (program.input_dtypes[i] != arr.inputs()[i].dtype() ||
+        program.input_shapes[i] != arr.inputs()[i].shape()) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    if (program.output_dtypes[i] != outputs[i].dtype() ||
+        program.output_shapes[i] != outputs[i].shape()) {
+      return false;
+    }
+  }
+  if (program.has_rms_eps) {
+    const auto* rms = dynamic_cast<const fast::RMSNorm*>(&arr.primitive());
+    if (rms == nullptr || rms->state().second != program.rms_eps) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool Runtime::try_initialize_runtime() {
