@@ -7,7 +7,6 @@
 
 #include "mlx/backend/ane/diagnostics.h"
 #include "mlx/backend/ane/support.h"
-#include "mlx/dtype.h"
 #include "mlx/utils.h"
 
 namespace mlx::core::ane {
@@ -22,10 +21,6 @@ std::unordered_map<int, Route>& route_by_stream() {
 std::mutex& route_mutex() {
   static std::mutex mtx;
   return mtx;
-}
-
-bool dtype_supported(const array& arr) {
-  return arr.dtype() != float64;
 }
 
 } // namespace
@@ -43,12 +38,11 @@ const char* route_name(Route route) {
 }
 
 RouteDecision decide_route(const array& arr) {
-  bool supported = supports_ane(arr.primitive());
-  if (!supported) {
+  if (!supports_ane(arr.primitive())) {
     return {Route::gpu, false, "unsupported-op"};
   }
-  if (!dtype_supported(arr)) {
-    return {Route::gpu, false, "unsupported-dtype"};
+  if (!supports_ane(arr)) {
+    return {Route::gpu, false, "unsupported-constraints"};
   }
   return {Route::ane, true, "supported"};
 }
