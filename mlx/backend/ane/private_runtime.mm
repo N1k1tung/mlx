@@ -828,7 +828,7 @@ bool build_mil(
        << "{\n"
        << "    func main<ios18>(tensor<" << in0_dtype << ", "
        << shape_to_mil(input_shapes_mil[0]) << "> x, tensor<" << in1_dtype
-       << ", " << shape_to_mil(input_shapes_mil[1]) << "> w) {\n"
+       << ", " << shape_to_mil(input_shapes_mil[1]) << "> y) {\n"
        << "        string work_t = const()[name = string(\"work_t\"), val = string(\""
        << work_dtype << "\")];\n"
        << "        string out_t = const()[name = string(\"out_t\"), val = string(\""
@@ -844,7 +844,7 @@ bool build_mil(
        << "        tensor<" << work_dtype << ", " << shape_to_mil(input_shapes_mil[0])
        << "> xw = cast(dtype = work_t, x = x)[name = string(\"xw\")];\n"
        << "        tensor<" << work_dtype << ", " << shape_to_mil(input_shapes_mil[1])
-       << "> ww = cast(dtype = work_t, x = w)[name = string(\"ww\")];\n"
+       << "> ww = cast(dtype = work_t, x = y)[name = string(\"ww\")];\n"
        << "        tensor<" << work_dtype << ", " << shape_to_mil(input_shapes_mil[0])
        << "> sq = mul(x = xw, y = xw)[name = string(\"sq\")];\n"
        << "        tensor<" << work_dtype << ", " << shape_to_mil(reduce_shape_mil)
