@@ -820,6 +820,7 @@ bool build_mil(
 
     const double invd = 1.0 / static_cast<double>(axis_dim);
     const float eps = rms_prim->state().second;
+    const char* work_dtype = in0_dtype;
 
     std::ostringstream os;
     os << std::setprecision(std::numeric_limits<float>::max_digits10);
@@ -828,36 +829,38 @@ bool build_mil(
        << "    func main<ios18>(tensor<" << in0_dtype << ", "
        << shape_to_mil(input_shapes_mil[0]) << "> x, tensor<" << in1_dtype
        << ", " << shape_to_mil(input_shapes_mil[1]) << "> w) {\n"
-       << "        string fp32_t = const()[name = string(\"fp32_t\"), val = string(\"fp32\")];\n"
+       << "        string work_t = const()[name = string(\"work_t\"), val = string(\""
+       << work_dtype << "\")];\n"
        << "        string out_t = const()[name = string(\"out_t\"), val = string(\""
        << out_dtype << "\")];\n"
        << "        tensor<int32, [1]> rax = const()[name = string(\"rax\"), val = tensor<int32, [1]>([3])];\n"
        << "        bool kd = const()[name = string(\"kd\"), val = bool(true)];\n"
-       << "        fp32 invd = const()[name = string(\"invd\"), val = fp32(" << invd
-       << ")];\n"
-       << "        fp32 eps = const()[name = string(\"eps\"), val = fp32(" << eps
-       << ")];\n"
-       << "        fp32 nhalf = const()[name = string(\"nhalf\"), val = fp32(-0.5)];\n"
-       << "        tensor<fp32, " << shape_to_mil(input_shapes_mil[0])
-       << "> x32 = cast(dtype = fp32_t, x = x)[name = string(\"x32\")];\n"
-       << "        tensor<fp32, " << shape_to_mil(input_shapes_mil[0])
-       << "> sq = mul(x = x32, y = x32)[name = string(\"sq\")];\n"
-       << "        tensor<fp32, " << shape_to_mil(reduce_shape_mil)
+       << "        " << work_dtype << " invd = const()[name = string(\"invd\"), val = "
+       << work_dtype << "(" << invd << ")];\n"
+       << "        " << work_dtype << " eps = const()[name = string(\"eps\"), val = "
+       << work_dtype << "(" << eps << ")];\n"
+       << "        " << work_dtype << " nhalf = const()[name = string(\"nhalf\"), val = "
+       << work_dtype << "(-0.5)];\n"
+       << "        tensor<" << work_dtype << ", " << shape_to_mil(input_shapes_mil[0])
+       << "> xw = cast(dtype = work_t, x = x)[name = string(\"xw\")];\n"
+       << "        tensor<" << work_dtype << ", " << shape_to_mil(input_shapes_mil[1])
+       << "> ww = cast(dtype = work_t, x = w)[name = string(\"ww\")];\n"
+       << "        tensor<" << work_dtype << ", " << shape_to_mil(input_shapes_mil[0])
+       << "> sq = mul(x = xw, y = xw)[name = string(\"sq\")];\n"
+       << "        tensor<" << work_dtype << ", " << shape_to_mil(reduce_shape_mil)
        << "> ss = reduce_sum(x = sq, axes = rax, keep_dims = kd)[name = string(\"ss\")];\n"
-       << "        tensor<fp32, " << shape_to_mil(reduce_shape_mil)
+       << "        tensor<" << work_dtype << ", " << shape_to_mil(reduce_shape_mil)
        << "> ss2 = mul(x = ss, y = invd)[name = string(\"ss2\")];\n"
-       << "        tensor<fp32, " << shape_to_mil(reduce_shape_mil)
+       << "        tensor<" << work_dtype << ", " << shape_to_mil(reduce_shape_mil)
        << "> ss3 = add(x = ss2, y = eps)[name = string(\"ss3\")];\n"
-       << "        tensor<fp32, " << shape_to_mil(reduce_shape_mil)
+       << "        tensor<" << work_dtype << ", " << shape_to_mil(reduce_shape_mil)
        << "> rrms = pow(x = ss3, y = nhalf)[name = string(\"rrms\")];\n"
-       << "        tensor<fp32, " << shape_to_mil(input_shapes_mil[0])
-       << "> xr = mul(x = x32, y = rrms)[name = string(\"xr\")];\n"
-       << "        tensor<" << out_dtype << ", " << shape_to_mil(input_shapes_mil[0])
-       << "> xn = cast(dtype = out_t, x = xr)[name = string(\"xn\")];\n"
-       << "        tensor<" << out_dtype << ", " << shape_to_mil(input_shapes_mil[1])
-       << "> rw = cast(dtype = out_t, x = w)[name = string(\"rw\")];\n"
+       << "        tensor<" << work_dtype << ", " << shape_to_mil(input_shapes_mil[0])
+       << "> xr = mul(x = xw, y = rrms)[name = string(\"xr\")];\n"
+       << "        tensor<" << work_dtype << ", " << shape_to_mil(out_shape_mil)
+       << "> yw = mul(x = xr, y = ww)[name = string(\"yw\")];\n"
        << "        tensor<" << out_dtype << ", " << shape_to_mil(out_shape_mil)
-       << "> out = mul(x = xn, y = rw)[name = string(\"ane_op\")];\n"
+       << "> out = cast(dtype = out_t, x = yw)[name = string(\"ane_op\")];\n"
        << "    } -> (out);\n"
        << "}\n";
     mil = os.str();
