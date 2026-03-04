@@ -157,6 +157,8 @@ struct RuntimeProfileCounters {
   std::atomic<uint64_t> dispatch_failures{0};
   std::atomic<uint64_t> dispatch_ns{0};
   std::atomic<uint64_t> pre_sync_ns{0};
+  std::atomic<uint64_t> pre_sync_stream_sync_calls{0};
+  std::atomic<uint64_t> pre_sync_stream_sync_ns{0};
   std::atomic<uint64_t> input_copy_ns{0};
   std::atomic<uint64_t> input_copy_bytes{0};
   std::atomic<uint64_t> request_build_ns{0};
@@ -193,6 +195,10 @@ void print_profile_summary(const char* tag) {
   const auto compile_alloc_ns = p.compile_alloc_ns.load(std::memory_order_relaxed);
   const auto dispatch_ns = p.dispatch_ns.load(std::memory_order_relaxed);
   const auto pre_sync_ns = p.pre_sync_ns.load(std::memory_order_relaxed);
+  const auto pre_sync_stream_sync_calls =
+      p.pre_sync_stream_sync_calls.load(std::memory_order_relaxed);
+  const auto pre_sync_stream_sync_ns =
+      p.pre_sync_stream_sync_ns.load(std::memory_order_relaxed);
   const auto input_copy_ns = p.input_copy_ns.load(std::memory_order_relaxed);
   const auto input_copy_bytes = p.input_copy_bytes.load(std::memory_order_relaxed);
   const auto request_build_ns = p.request_build_ns.load(std::memory_order_relaxed);
@@ -214,6 +220,8 @@ void print_profile_summary(const char* tag) {
             << " compile_alloc_ms=" << ns_to_ms(compile_alloc_ns)
             << " dispatch_ms=" << ns_to_ms(dispatch_ns)
             << " pre_sync_ms=" << ns_to_ms(pre_sync_ns)
+            << " pre_sync_stream_sync_calls=" << pre_sync_stream_sync_calls
+            << " pre_sync_stream_sync_ms=" << ns_to_ms(pre_sync_stream_sync_ns)
             << " input_copy_ms=" << ns_to_ms(input_copy_ns)
             << " input_copy_mib=" << bytes_to_mib(input_copy_bytes)
             << " request_build_ms=" << ns_to_ms(request_build_ns)
@@ -1301,6 +1309,8 @@ struct DispatchProfileScope {
   bool enabled{false};
   uint64_t begin_ns{0};
   uint64_t pre_sync_ns{0};
+  uint64_t pre_sync_stream_sync_calls{0};
+  uint64_t pre_sync_stream_sync_ns{0};
   uint64_t input_copy_ns{0};
   uint64_t input_copy_bytes{0};
   uint64_t request_build_ns{0};
@@ -1327,6 +1337,12 @@ struct DispatchProfileScope {
     }
     p.dispatch_ns.fetch_add(total, std::memory_order_relaxed);
     p.pre_sync_ns.fetch_add(pre_sync_ns, std::memory_order_relaxed);
+    p.pre_sync_stream_sync_calls.fetch_add(
+        pre_sync_stream_sync_calls,
+        std::memory_order_relaxed);
+    p.pre_sync_stream_sync_ns.fetch_add(
+        pre_sync_stream_sync_ns,
+        std::memory_order_relaxed);
     p.input_copy_ns.fetch_add(input_copy_ns, std::memory_order_relaxed);
     p.input_copy_bytes.fetch_add(input_copy_bytes, std::memory_order_relaxed);
     p.request_build_ns.fetch_add(request_build_ns, std::memory_order_relaxed);
@@ -1654,7 +1670,10 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     const uint64_t sync_begin_ns = profile_scope.enabled ? now_ns() : 0;
     gpu::synchronize(arr.primitive().stream());
     if (profile_scope.enabled) {
-      profile_scope.pre_sync_ns += now_ns() - sync_begin_ns;
+      const uint64_t dt = now_ns() - sync_begin_ns;
+      profile_scope.pre_sync_ns += dt;
+      profile_scope.pre_sync_stream_sync_calls += 1;
+      profile_scope.pre_sync_stream_sync_ns += dt;
     }
     DRUNTIME_LOG("dispatch staging pre-sync complete");
   }
