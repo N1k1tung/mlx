@@ -1634,6 +1634,16 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
   std::vector<bool> input_needs_copy(inputs.size(), false);
   bool has_reused_inputs = false;
   bool needs_sync = false;
+  std::vector<int> sync_stream_indices;
+  auto add_sync_stream = [&](int stream_index) {
+    if (
+        std::find(
+            sync_stream_indices.begin(),
+            sync_stream_indices.end(),
+            stream_index) == sync_stream_indices.end()) {
+      sync_stream_indices.push_back(stream_index);
+    }
+  };
   for (size_t i = 0; i < inputs.size(); ++i) {
     const auto& in = inputs[i];
     if (in.status() == array::Status::unscheduled) {
@@ -1662,18 +1672,26 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
     if (!in.is_available()) {
       needs_sync = true;
+      if (in.event().valid()) {
+        add_sync_stream(in.event().stream().index);
+      }
     }
   }
 
   if (needs_sync) {
     DRUNTIME_LOG("dispatch staging pre-sync begin");
-    const uint64_t sync_begin_ns = profile_scope.enabled ? now_ns() : 0;
-    gpu::synchronize(arr.primitive().stream());
-    if (profile_scope.enabled) {
-      const uint64_t dt = now_ns() - sync_begin_ns;
-      profile_scope.pre_sync_ns += dt;
-      profile_scope.pre_sync_stream_sync_calls += 1;
-      profile_scope.pre_sync_stream_sync_ns += dt;
+    if (sync_stream_indices.empty()) {
+      add_sync_stream(arr.primitive().stream().index);
+    }
+    for (auto stream_index : sync_stream_indices) {
+      const uint64_t sync_begin_ns = profile_scope.enabled ? now_ns() : 0;
+      gpu::synchronize(Stream(stream_index, Device::gpu));
+      if (profile_scope.enabled) {
+        const uint64_t dt = now_ns() - sync_begin_ns;
+        profile_scope.pre_sync_ns += dt;
+        profile_scope.pre_sync_stream_sync_calls += 1;
+        profile_scope.pre_sync_stream_sync_ns += dt;
+      }
     }
     DRUNTIME_LOG("dispatch staging pre-sync complete");
   }
