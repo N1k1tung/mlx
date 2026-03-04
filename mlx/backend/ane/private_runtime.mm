@@ -29,6 +29,7 @@
 
 #include "mlx/allocator.h"
 #include "mlx/backend/ane/support.h"
+#include "mlx/backend/common/utils.h"
 #include "mlx/backend/gpu/eval.h"
 #include "mlx/fast_primitives.h"
 #include "mlx/primitives.h"
@@ -402,6 +403,40 @@ const char* mil_dtype(Dtype dtype) {
 
 bool io_layout_supported(const array& arr) {
   return arr.flags().row_contiguous;
+}
+
+bool fastpath_requires_materialized_input(array& arr) {
+  auto& primitive = arr.primitive();
+  const auto& inputs = arr.inputs();
+  if (inputs.size() != 1) {
+    return true;
+  }
+  const auto& in = inputs[0];
+
+  if (
+      typeid(primitive) == typeid(Reshape) ||
+      typeid(primitive) == typeid(Flatten) ||
+      typeid(primitive) == typeid(Unflatten)) {
+    try {
+      auto [copy_necessary, out_strides] = prepare_reshape(in, arr);
+      (void)out_strides;
+      return copy_necessary;
+    } catch (...) {
+      return true;
+    }
+  }
+
+  if (typeid(primitive) == typeid(Contiguous)) {
+    constexpr size_t extra_bytes = 16384;
+    // Conservative no-copy detection: row-contiguous branch is independent of
+    // allow_col_major and always aliases input.
+    if (in.buffer_size() <= arr.nbytes() + extra_bytes && in.flags().row_contiguous) {
+      return false;
+    }
+    return true;
+  }
+
+  return true;
 }
 
 bool build_mil(
@@ -1335,11 +1370,13 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
   }
 
   const bool view_only = is_view_only_fastpath_primitive(primitive);
+  const bool materializing = !view_only && fastpath_requires_materialized_input(arr);
+  const bool can_skip_sync = view_only || !materializing;
   const bool profiling = profile_mode();
   uint64_t fastpath_sync_ns = 0;
   bool did_sync = false;
 
-  if (!view_only) {
+  if (!can_skip_sync) {
     bool needs_sync = false;
     for (const auto& in : inputs) {
       if (!in.is_available()) {
@@ -1374,7 +1411,7 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
     for (size_t i = 0; i < inputs.size(); ++i) {
       if (!inputs[i].is_available()) {
         if (reason) {
-          *reason = "metadata-fastpath-view-input-not-available:" +
+          *reason = "metadata-fastpath-input-not-available-no-sync:" +
               std::to_string(i);
         }
         return false;
@@ -1403,7 +1440,8 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
     p.fastpath_ns.fetch_add(now_ns() - begin_ns, std::memory_order_relaxed);
     if (view_only) {
       p.fastpath_view_only_calls.fetch_add(1, std::memory_order_relaxed);
-    } else {
+    }
+    if (materializing) {
       p.fastpath_materializing_calls.fetch_add(1, std::memory_order_relaxed);
     }
     if (did_sync) {
