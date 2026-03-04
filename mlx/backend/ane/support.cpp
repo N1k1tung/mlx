@@ -4,6 +4,7 @@
 
 #include <typeinfo>
 
+#include "mlx/fast_primitives.h"
 #include "mlx/primitives.h"
 
 namespace mlx::core::ane {
@@ -26,7 +27,7 @@ bool supports_ane(const Primitive& p) {
       typeid(p) == typeid(ExpandDims) || typeid(p) == typeid(Squeeze) ||
       typeid(p) == typeid(Transpose) || typeid(p) == typeid(Concatenate) ||
       typeid(p) == typeid(Slice) || typeid(p) == typeid(Sigmoid) ||
-      typeid(p) == typeid(Contiguous);
+      typeid(p) == typeid(Contiguous) || typeid(p) == typeid(fast::RMSNorm);
 }
 
 } // namespace mlx::core::ane

@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -29,6 +30,7 @@
 #include "mlx/allocator.h"
 #include "mlx/backend/ane/support.h"
 #include "mlx/backend/gpu/eval.h"
+#include "mlx/fast_primitives.h"
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
@@ -781,6 +783,81 @@ bool build_mil(
        << "        int32 ax = const()[name = string(\"ax\"), val = int32(-1)];\n"
        << "        tensor<" << out_dtype << ", " << shape_to_mil(out_shape_mil)
        << "> out = softmax(axis = ax, x = x)[name = string(\"ane_op\")];\n"
+       << "    } -> (out);\n"
+       << "}\n";
+    mil = os.str();
+    return true;
+  }
+
+  if (const auto* rms_prim = dynamic_cast<const fast::RMSNorm*>(&primitive);
+      rms_prim != nullptr) {
+    if (inputs.size() != 2) {
+      reason = "rmsnorm-arity-mismatch";
+      return false;
+    }
+    if (inputs[1].ndim() > 1) {
+      reason = "rmsnorm-weight-rank>1";
+      return false;
+    }
+    auto in0_dtype = mil_dtype(inputs[0].dtype());
+    auto in1_dtype = mil_dtype(inputs[1].dtype());
+    if (in0_dtype == nullptr || in1_dtype == nullptr) {
+      reason = "unsupported-input-dtype-token";
+      return false;
+    }
+    int64_t axis_dim = input_shapes_mil[0][3];
+    if (axis_dim <= 0) {
+      reason = "rmsnorm-invalid-last-dim";
+      return false;
+    }
+
+    Shape reduce_shape_mil = {
+        input_shapes_mil[0][0],
+        input_shapes_mil[0][1],
+        input_shapes_mil[0][2],
+        1,
+    };
+
+    const double invd = 1.0 / static_cast<double>(axis_dim);
+    const float eps = rms_prim->state().second;
+
+    std::ostringstream os;
+    os << std::setprecision(std::numeric_limits<float>::max_digits10);
+    os << "program(1.3)\n" << kBuildInfo
+       << "{\n"
+       << "    func main<ios18>(tensor<" << in0_dtype << ", "
+       << shape_to_mil(input_shapes_mil[0]) << "> x, tensor<" << in1_dtype
+       << ", " << shape_to_mil(input_shapes_mil[1]) << "> w) {\n"
+       << "        string fp32_t = const()[name = string(\"fp32_t\"), val = string(\"fp32\")];\n"
+       << "        string out_t = const()[name = string(\"out_t\"), val = string(\""
+       << out_dtype << "\")];\n"
+       << "        tensor<int32, [1]> rax = const()[name = string(\"rax\"), val = tensor<int32, [1]>([3])];\n"
+       << "        bool kd = const()[name = string(\"kd\"), val = bool(true)];\n"
+       << "        fp32 invd = const()[name = string(\"invd\"), val = fp32(" << invd
+       << ")];\n"
+       << "        fp32 eps = const()[name = string(\"eps\"), val = fp32(" << eps
+       << ")];\n"
+       << "        fp32 nhalf = const()[name = string(\"nhalf\"), val = fp32(-0.5)];\n"
+       << "        tensor<fp32, " << shape_to_mil(input_shapes_mil[0])
+       << "> x32 = cast(dtype = fp32_t, x = x)[name = string(\"x32\")];\n"
+       << "        tensor<fp32, " << shape_to_mil(input_shapes_mil[0])
+       << "> sq = mul(x = x32, y = x32)[name = string(\"sq\")];\n"
+       << "        tensor<fp32, " << shape_to_mil(reduce_shape_mil)
+       << "> ss = reduce_sum(x = sq, axes = rax, keep_dims = kd)[name = string(\"ss\")];\n"
+       << "        tensor<fp32, " << shape_to_mil(reduce_shape_mil)
+       << "> ss2 = mul(x = ss, y = invd)[name = string(\"ss2\")];\n"
+       << "        tensor<fp32, " << shape_to_mil(reduce_shape_mil)
+       << "> ss3 = add(x = ss2, y = eps)[name = string(\"ss3\")];\n"
+       << "        tensor<fp32, " << shape_to_mil(reduce_shape_mil)
+       << "> rrms = pow(x = ss3, y = nhalf)[name = string(\"rrms\")];\n"
+       << "        tensor<fp32, " << shape_to_mil(input_shapes_mil[0])
+       << "> xr = mul(x = x32, y = rrms)[name = string(\"xr\")];\n"
+       << "        tensor<" << out_dtype << ", " << shape_to_mil(input_shapes_mil[0])
+       << "> xn = cast(dtype = out_t, x = xr)[name = string(\"xn\")];\n"
+       << "        tensor<" << out_dtype << ", " << shape_to_mil(input_shapes_mil[1])
+       << "> rw = cast(dtype = out_t, x = w)[name = string(\"rw\")];\n"
+       << "        tensor<" << out_dtype << ", " << shape_to_mil(out_shape_mil)
+       << "> out = mul(x = xn, y = rw)[name = string(\"ane_op\")];\n"
        << "    } -> (out);\n"
        << "}\n";
     mil = os.str();

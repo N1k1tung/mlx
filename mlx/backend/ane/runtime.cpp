@@ -3,7 +3,9 @@
 #include "mlx/backend/ane/runtime.h"
 
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 
 #include "mlx/backend/ane/diagnostics.h"
@@ -11,6 +13,7 @@
 #include "mlx/backend/ane/private_runtime.h"
 #include "mlx/backend/gpu/device_info.h"
 #include "mlx/backend/gpu/eval.h"
+#include "mlx/fast_primitives.h"
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
@@ -69,9 +72,14 @@ std::string Runtime::runtime_unavailable_reason() {
 
 std::string Runtime::make_cache_key(const array& arr) const {
   std::ostringstream os;
+  os << std::setprecision(std::numeric_limits<float>::max_digits10);
   auto& p = arr.primitive();
   os << p.name() << "|inputs=" << arr.inputs().size()
      << "|outputs=" << arr.outputs().size();
+
+  if (const auto* rms = dynamic_cast<const fast::RMSNorm*>(&p); rms != nullptr) {
+    os << "|eps=" << rms->state().second;
+  }
 
   for (const auto& in : arr.inputs()) {
     os << "|in:" << in.dtype() << ":" << in.shape();
