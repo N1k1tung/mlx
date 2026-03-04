@@ -901,13 +901,61 @@ IOSurfaceRef create_surface(size_t bytes) {
 }
 
 struct ANESurfaceAttachment {
-  IOSurfaceRef surface{nullptr};
+  struct SurfaceHandle {
+    IOSurfaceRef surface{nullptr};
+    id __strong wrapper{nil};
+  };
+
+  struct SurfacePool {
+    std::mutex mtx;
+    std::vector<SurfaceHandle> free_handles;
+
+    ~SurfacePool() {
+      for (auto& h : free_handles) {
+        if (h.surface != nullptr) {
+          CFRelease(h.surface);
+          h.surface = nullptr;
+        }
+        h.wrapper = nil;
+      }
+    }
+
+    bool acquire(SurfaceHandle& out) {
+      std::lock_guard<std::mutex> lk(mtx);
+      if (free_handles.empty()) {
+        return false;
+      }
+      out = free_handles.back();
+      free_handles.pop_back();
+      return true;
+    }
+
+    void recycle(const SurfaceHandle& handle) {
+      if (handle.surface == nullptr || handle.wrapper == nil) {
+        return;
+      }
+      std::lock_guard<std::mutex> lk(mtx);
+      free_handles.push_back(handle);
+    }
+  };
+
+  SurfaceHandle handle{};
   size_t nbytes{0};
+  std::shared_ptr<SurfacePool> pool{};
 
   ~ANESurfaceAttachment() {
-    if (surface != nullptr) {
-      CFRelease(surface);
+    if (handle.surface == nullptr) {
+      return;
     }
+    if (pool != nullptr) {
+      pool->recycle(handle);
+      handle.surface = nullptr;
+      handle.wrapper = nil;
+      return;
+    }
+    CFRelease(handle.surface);
+    handle.surface = nullptr;
+    handle.wrapper = nil;
   }
 };
 
@@ -924,44 +972,72 @@ std::shared_ptr<ANESurfaceAttachment> get_ane_surface_attachment(const array& ar
   return std::static_pointer_cast<ANESurfaceAttachment>(attachment);
 }
 
-IOSurfaceRef reusable_input_surface(const array& arr, size_t required_nbytes) {
+std::shared_ptr<ANESurfaceAttachment> reusable_input_attachment(
+    const array& arr,
+    size_t required_nbytes) {
   if (arr.offset() != 0 || !arr.flags().row_contiguous) {
-    return nullptr;
+    return {};
   }
   auto attachment = get_ane_surface_attachment(arr);
-  if (attachment == nullptr || attachment->surface == nullptr) {
-    return nullptr;
+  if (
+      attachment == nullptr || attachment->handle.surface == nullptr ||
+      attachment->handle.wrapper == nil) {
+    return {};
   }
   if (attachment->nbytes < required_nbytes) {
-    return nullptr;
+    return {};
   }
-  return attachment->surface;
+  return attachment;
+}
+
+bool create_surface_handle(
+    RuntimeState& state,
+    size_t nbytes,
+    ANESurfaceAttachment::SurfaceHandle& handle) {
+  handle = {};
+  auto surface = create_surface(nbytes);
+  if (surface == nullptr) {
+    return false;
+  }
+  id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
+      state.iosurface_cls, @selector(objectWithIOSurface:), surface);
+  if (wrapped == nil) {
+    CFRelease(surface);
+    return false;
+  }
+  handle.surface = surface;
+  handle.wrapper = wrapped;
+  return true;
 }
 
 bool bind_output_surface_to_array(
     array& out,
-    IOSurfaceRef surface,
-    size_t surface_nbytes) {
-  if (surface == nullptr || out.offset() != 0 || !out.flags().row_contiguous) {
+    ANESurfaceAttachment::SurfaceHandle* handle,
+    size_t surface_nbytes,
+    const std::shared_ptr<ANESurfaceAttachment::SurfacePool>& pool) {
+  if (
+      handle == nullptr || handle->surface == nullptr || handle->wrapper == nil ||
+      out.offset() != 0 || !out.flags().row_contiguous) {
     return false;
   }
-  IOSurfaceLock(surface, 0, nullptr);
-  void* base = IOSurfaceGetBaseAddress(surface);
+  IOSurfaceLock(handle->surface, 0, nullptr);
+  void* base = IOSurfaceGetBaseAddress(handle->surface);
   if (base == nullptr) {
-    IOSurfaceUnlock(surface, 0, nullptr);
+    IOSurfaceUnlock(handle->surface, 0, nullptr);
     return false;
   }
   auto wrapped = allocator::make_buffer(base, surface_nbytes);
-  IOSurfaceUnlock(surface, 0, nullptr);
+  IOSurfaceUnlock(handle->surface, 0, nullptr);
   if (wrapped.ptr() == nullptr) {
     return false;
   }
 
-  // Keep IOSurface alive with the array data lifetime.
-  CFRetain(surface);
   auto attachment = std::make_shared<ANESurfaceAttachment>();
-  attachment->surface = surface;
+  attachment->handle = *handle;
   attachment->nbytes = surface_nbytes;
+  attachment->pool = pool;
+  handle->surface = nullptr;
+  handle->wrapper = nil;
 
   out.set_data(
       wrapped,
@@ -970,15 +1046,6 @@ bool bind_output_surface_to_array(
       });
   out.set_data_attachment(ane_surface_attachment_type_tag(), attachment);
   return true;
-}
-
-void release_surfaces(std::vector<IOSurfaceRef>& surfaces) {
-  for (auto& surface : surfaces) {
-    if (surface != nullptr) {
-      CFRelease(surface);
-      surface = nullptr;
-    }
-  }
 }
 
 NSString* create_mil_model_dir(const std::string& mil, std::string& reason) {
@@ -1130,11 +1197,13 @@ struct Program {
   id __strong client{nil};
   id __strong model{nil};
   NSString* __strong model_dir{nil};
+  NSArray* __strong input_wrappers{nil};
   NSArray* __strong input_indices{nil};
   NSArray* __strong output_indices{nil};
   std::vector<IOSurfaceRef> input_surfaces;
   std::vector<size_t> input_nbytes;
   std::vector<size_t> output_nbytes;
+  std::vector<std::shared_ptr<ANESurfaceAttachment::SurfacePool>> output_pools;
 
   ~Program() {
     if (client != nil && model != nil) {
@@ -1364,6 +1433,7 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
   prog->input_nbytes.reserve(arr.inputs().size());
   prog->output_nbytes.reserve(outputs.size());
   prog->input_surfaces.reserve(arr.inputs().size());
+  prog->output_pools.reserve(outputs.size());
   uint64_t alloc_begin_ns = 0;
   if (profile_scope.enabled) {
     alloc_begin_ns = now_ns();
@@ -1383,16 +1453,29 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
   DRUNTIME_LOG("compile step: input IOSurfaces allocated");
   for (const auto& out : outputs) {
     prog->output_nbytes.push_back(out.nbytes());
+    prog->output_pools.push_back(std::make_shared<ANESurfaceAttachment::SurfacePool>());
   }
   if (profile_scope.enabled) {
     profile_scope.alloc_ns += now_ns() - alloc_begin_ns;
   }
 
+  NSMutableArray* input_wrappers =
+      [NSMutableArray arrayWithCapacity:prog->input_surfaces.size()];
   NSMutableArray* input_indices =
       [NSMutableArray arrayWithCapacity:prog->input_surfaces.size()];
   for (size_t i = 0; i < prog->input_surfaces.size(); ++i) {
+    id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
+        s.iosurface_cls, @selector(objectWithIOSurface:), prog->input_surfaces[i]);
+    if (wrapped == nil) {
+      if (reason) {
+        *reason = "compile-input-wrap-failed";
+      }
+      return nullptr;
+    }
+    [input_wrappers addObject:wrapped];
     [input_indices addObject:@(i)];
   }
+  prog->input_wrappers = [input_wrappers copy];
   prog->input_indices = [input_indices copy];
 
   NSMutableArray* output_indices =
@@ -1431,15 +1514,25 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
     return false;
   }
-  if (program.input_indices == nil || program.output_indices == nil) {
+  if (outputs.size() != program.output_pools.size()) {
     if (reason) {
-      *reason = "program-indices-missing";
+      *reason = "output-pool-count-mismatch";
+    }
+    return false;
+  }
+  if (
+      program.input_wrappers == nil || program.input_indices == nil ||
+      program.output_indices == nil) {
+    if (reason) {
+      *reason = "program-bindings-missing";
     }
     return false;
   }
 
-  std::vector<IOSurfaceRef> resolved_input_surfaces(inputs.size(), nullptr);
+  std::vector<ANESurfaceAttachment::SurfaceHandle> resolved_input_handles(inputs.size());
+  std::vector<std::shared_ptr<ANESurfaceAttachment>> reused_input_attachments(inputs.size());
   std::vector<bool> input_needs_copy(inputs.size(), false);
+  bool has_reused_inputs = false;
   bool needs_sync = false;
   for (size_t i = 0; i < inputs.size(); ++i) {
     const auto& in = inputs[i];
@@ -1450,14 +1543,23 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       return false;
     }
 
-    auto reused = reusable_input_surface(in, program.input_nbytes[i]);
+    auto reused = reusable_input_attachment(in, program.input_nbytes[i]);
     if (reused != nullptr) {
-      resolved_input_surfaces[i] = reused;
+      reused_input_attachments[i] = reused;
+      resolved_input_handles[i] = reused->handle;
+      has_reused_inputs = true;
       continue;
     }
 
     input_needs_copy[i] = true;
-    resolved_input_surfaces[i] = program.input_surfaces[i];
+    resolved_input_handles[i].surface = program.input_surfaces[i];
+    resolved_input_handles[i].wrapper = [program.input_wrappers objectAtIndex:i];
+    if (resolved_input_handles[i].wrapper == nil) {
+      if (reason) {
+        *reason = "input-wrapper-missing:" + std::to_string(i);
+      }
+      return false;
+    }
     if (!in.is_available()) {
       needs_sync = true;
     }
@@ -1473,8 +1575,28 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     DRUNTIME_LOG("dispatch staging pre-sync complete");
   }
 
-  std::vector<IOSurfaceRef> dispatch_output_surfaces(outputs.size(), nullptr);
-  auto release_dispatch_outputs = [&]() { release_surfaces(dispatch_output_surfaces); };
+  std::vector<ANESurfaceAttachment::SurfaceHandle> dispatch_output_handles(outputs.size());
+  auto recycle_output_handle = [&](size_t i) {
+    auto& handle = dispatch_output_handles[i];
+    if (handle.surface == nullptr) {
+      return;
+    }
+    auto pool = program.output_pools[i];
+    if (pool != nullptr) {
+      pool->recycle(handle);
+      handle.surface = nullptr;
+      handle.wrapper = nil;
+      return;
+    }
+    CFRelease(handle.surface);
+    handle.surface = nullptr;
+    handle.wrapper = nil;
+  };
+  auto recycle_all_outputs = [&]() {
+    for (size_t i = 0; i < dispatch_output_handles.size(); ++i) {
+      recycle_output_handle(i);
+    }
+  };
 
   @autoreleasepool {
     DRUNTIME_LOG("dispatch start: staging inputs");
@@ -1509,7 +1631,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         }
         return false;
       }
-      auto surface = resolved_input_surfaces[i];
+      auto surface = resolved_input_handles[i].surface;
       if (surface == nullptr) {
         if (reason) {
           *reason = "input-surface-null:" + std::to_string(i);
@@ -1543,42 +1665,48 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     DRUNTIME_LOG("dispatch request build begin");
     const uint64_t request_build_begin_ns = profile_scope.enabled ? now_ns() : 0;
 
-    NSMutableArray* input_wrappers =
-        [NSMutableArray arrayWithCapacity:resolved_input_surfaces.size()];
-    for (size_t i = 0; i < resolved_input_surfaces.size(); ++i) {
-      id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
-          s.iosurface_cls, @selector(objectWithIOSurface:), resolved_input_surfaces[i]);
-      if (wrapped == nil) {
+    id input_wrappers = program.input_wrappers;
+    if (has_reused_inputs) {
+      NSMutableArray* mutable_wrappers = [program.input_wrappers mutableCopy];
+      if (mutable_wrappers == nil) {
         if (reason) {
-          *reason = "request-input-wrap-failed:" + std::to_string(i);
+          *reason = "request-input-wrappers-copy-failed";
         }
         return false;
       }
-      [input_wrappers addObject:wrapped];
+      for (size_t i = 0; i < reused_input_attachments.size(); ++i) {
+        auto& reused = reused_input_attachments[i];
+        if (reused == nullptr) {
+          continue;
+        }
+        [mutable_wrappers replaceObjectAtIndex:i withObject:reused->handle.wrapper];
+      }
+      input_wrappers = [mutable_wrappers copy];
     }
 
     NSMutableArray* output_wrappers =
-        [NSMutableArray arrayWithCapacity:dispatch_output_surfaces.size()];
-    for (size_t i = 0; i < dispatch_output_surfaces.size(); ++i) {
-      auto surface = create_surface(program.output_nbytes[i]);
-      if (surface == nullptr) {
+        [NSMutableArray arrayWithCapacity:dispatch_output_handles.size()];
+    for (size_t i = 0; i < dispatch_output_handles.size(); ++i) {
+      auto pool = program.output_pools[i];
+      auto& handle = dispatch_output_handles[i];
+      if (
+          pool == nullptr ||
+          (!pool->acquire(handle) &&
+           !create_surface_handle(s, program.output_nbytes[i], handle))) {
         if (reason) {
-          *reason = "dispatch-output-surface-create-failed:" + std::to_string(i);
+          *reason = "dispatch-output-handle-acquire-failed:" + std::to_string(i);
         }
-        release_dispatch_outputs();
+        recycle_all_outputs();
         return false;
       }
-      dispatch_output_surfaces[i] = surface;
-      id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
-          s.iosurface_cls, @selector(objectWithIOSurface:), surface);
-      if (wrapped == nil) {
+      if (handle.surface == nullptr || handle.wrapper == nil) {
         if (reason) {
-          *reason = "request-output-wrap-failed:" + std::to_string(i);
+          *reason = "dispatch-output-handle-invalid:" + std::to_string(i);
         }
-        release_dispatch_outputs();
+        recycle_all_outputs();
         return false;
       }
-      [output_wrappers addObject:wrapped];
+      [output_wrappers addObject:handle.wrapper];
     }
 
     id request_obj = ((id(*)(Class, SEL, id, id, id, id, id, id, id))objc_msgSend)(
@@ -1598,7 +1726,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       if (reason) {
         *reason = "request-create-failed";
       }
-      release_dispatch_outputs();
+      recycle_all_outputs();
       return false;
     }
 
@@ -1622,7 +1750,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         *reason = e ? std::string([[e description] UTF8String])
                     : std::string("evaluate-failed-no-error");
       }
-      release_dispatch_outputs();
+      recycle_all_outputs();
       return false;
     }
   }
@@ -1631,14 +1759,24 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     auto& out = outputs[i];
     DRUNTIME_LOG_LAZY(
         [&]() { return "dispatch output[" + std::to_string(i) + "] begin"; });
-    auto surface = dispatch_output_surfaces[i];
-    if (bind_output_surface_to_array(out, surface, program.output_nbytes[i])) {
+    auto& handle = dispatch_output_handles[i];
+    if (
+        bind_output_surface_to_array(
+            out, &handle, program.output_nbytes[i], program.output_pools[i])) {
       DRUNTIME_LOG_LAZY([&]() {
         return "dispatch output[" + std::to_string(i) + "] bound";
       });
       continue;
     }
 
+    auto surface = handle.surface;
+    if (surface == nullptr) {
+      if (reason) {
+        *reason = "output-surface-null:" + std::to_string(i);
+      }
+      recycle_all_outputs();
+      return false;
+    }
     auto data_ref = out.data_shared_ptr();
     bool need_alloc = (data_ref == nullptr || data_ref->buffer.ptr() == nullptr);
     if (!need_alloc) {
@@ -1652,7 +1790,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       if (reason) {
         *reason = "output-data-null:" + std::to_string(i);
       }
-      release_dispatch_outputs();
+      recycle_all_outputs();
       return false;
     }
     IOSurfaceLock(surface, kIOSurfaceLockReadOnly, nullptr);
@@ -1662,7 +1800,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       if (reason) {
         *reason = "output-surface-base-null:" + std::to_string(i);
       }
-      release_dispatch_outputs();
+      recycle_all_outputs();
       return false;
     }
     const size_t copy_nbytes = std::min(out.nbytes(), program.output_nbytes[i]);
@@ -1676,8 +1814,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     DRUNTIME_LOG_LAZY([&]() {
       return "dispatch output[" + std::to_string(i) + "] copied";
     });
+    recycle_output_handle(i);
   }
-  release_dispatch_outputs();
+  recycle_all_outputs();
   DRUNTIME_LOG("dispatch output processing complete");
 
   if (reason) {
