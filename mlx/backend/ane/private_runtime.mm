@@ -144,6 +144,10 @@ double bytes_to_mib(uint64_t bytes) {
 struct RuntimeProfileCounters {
   std::atomic<uint64_t> fastpath_calls{0};
   std::atomic<uint64_t> fastpath_ns{0};
+  std::atomic<uint64_t> fastpath_view_only_calls{0};
+  std::atomic<uint64_t> fastpath_materializing_calls{0};
+  std::atomic<uint64_t> fastpath_sync_calls{0};
+  std::atomic<uint64_t> fastpath_sync_ns{0};
   std::atomic<uint64_t> compile_calls{0};
   std::atomic<uint64_t> compile_ns{0};
   std::atomic<uint64_t> compile_model_ns{0};
@@ -173,6 +177,13 @@ void print_profile_summary(const char* tag) {
   auto& p = runtime_profile();
   const auto fastpath_calls = p.fastpath_calls.load(std::memory_order_relaxed);
   const auto fastpath_ns = p.fastpath_ns.load(std::memory_order_relaxed);
+  const auto fastpath_view_only_calls =
+      p.fastpath_view_only_calls.load(std::memory_order_relaxed);
+  const auto fastpath_materializing_calls =
+      p.fastpath_materializing_calls.load(std::memory_order_relaxed);
+  const auto fastpath_sync_calls =
+      p.fastpath_sync_calls.load(std::memory_order_relaxed);
+  const auto fastpath_sync_ns = p.fastpath_sync_ns.load(std::memory_order_relaxed);
   const auto compile_calls = p.compile_calls.load(std::memory_order_relaxed);
   const auto dispatch_calls = p.dispatch_calls.load(std::memory_order_relaxed);
   const auto dispatch_failures = p.dispatch_failures.load(std::memory_order_relaxed);
@@ -193,6 +204,10 @@ void print_profile_summary(const char* tag) {
             << " dispatch_calls=" << dispatch_calls
             << " dispatch_failures=" << dispatch_failures
             << " fastpath_ms=" << ns_to_ms(fastpath_ns)
+            << " fastpath_view_only_calls=" << fastpath_view_only_calls
+            << " fastpath_materializing_calls=" << fastpath_materializing_calls
+            << " fastpath_sync_calls=" << fastpath_sync_calls
+            << " fastpath_sync_ms=" << ns_to_ms(fastpath_sync_ns)
             << " compile_ms=" << ns_to_ms(compile_ns)
             << " compile_model_ms=" << ns_to_ms(compile_model_ns)
             << " compile_alloc_ms=" << ns_to_ms(compile_alloc_ns)
@@ -1319,15 +1334,26 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
     }
   }
 
-  bool needs_sync = false;
-  for (const auto& in : inputs) {
-    if (!in.is_available()) {
-      needs_sync = true;
-      break;
+  const bool view_only = is_view_only_fastpath_primitive(primitive);
+  const bool profiling = profile_mode();
+  uint64_t fastpath_sync_ns = 0;
+  bool did_sync = false;
+
+  if (!view_only) {
+    bool needs_sync = false;
+    for (const auto& in : inputs) {
+      if (!in.is_available()) {
+        needs_sync = true;
+        break;
+      }
     }
-  }
-  if (needs_sync) {
+    if (needs_sync) {
+      const uint64_t sync_begin_ns = profiling ? now_ns() : 0;
       gpu::synchronize(arr.primitive().stream());
+      if (profiling) {
+        fastpath_sync_ns += now_ns() - sync_begin_ns;
+      }
+      did_sync = true;
       for (size_t i = 0; i < inputs.size(); ++i) {
         if (!inputs[i].is_available()) {
           if (strict_input_ready_mode()) {
@@ -1343,9 +1369,20 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
           });
         }
       }
+    }
+  } else if (strict_input_ready_mode()) {
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      if (!inputs[i].is_available()) {
+        if (reason) {
+          *reason = "metadata-fastpath-view-input-not-available:" +
+              std::to_string(i);
+        }
+        return false;
+      }
+    }
   }
 
-  const uint64_t begin_ns = profile_mode() ? now_ns() : 0;
+  const uint64_t begin_ns = profiling ? now_ns() : 0;
   try {
     unary->eval_cpu(arr.inputs(), arr);
   } catch (const std::exception& e) {
@@ -1360,10 +1397,19 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
     return false;
   }
 
-  if (profile_mode()) {
+  if (profiling) {
     auto& p = runtime_profile();
     p.fastpath_calls.fetch_add(1, std::memory_order_relaxed);
     p.fastpath_ns.fetch_add(now_ns() - begin_ns, std::memory_order_relaxed);
+    if (view_only) {
+      p.fastpath_view_only_calls.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      p.fastpath_materializing_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (did_sync) {
+      p.fastpath_sync_calls.fetch_add(1, std::memory_order_relaxed);
+      p.fastpath_sync_ns.fetch_add(fastpath_sync_ns, std::memory_order_relaxed);
+    }
   }
   if (reason) {
     *reason = "metadata-fastpath";

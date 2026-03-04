@@ -10,6 +10,7 @@ namespace ane {
 
 bool supports_ane(const Primitive& p);
 bool is_metadata_fastpath_primitive(const Primitive& p);
+bool is_view_only_fastpath_primitive(const Primitive& p);
 
 } // namespace ane
 } // namespace mlx::core
