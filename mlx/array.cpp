@@ -179,6 +179,33 @@ void array::set_data(allocator::Buffer buffer, Deleter d) {
   array_desc_->flags.col_contiguous = size() <= 1 || size() == *max_dim;
 }
 
+void array::set_data_attachment(
+    const void* type_tag,
+    std::shared_ptr<void> attachment) {
+  if (array_desc_->data == nullptr) {
+    return;
+  }
+  if (type_tag == nullptr || attachment == nullptr) {
+    array_desc_->data->attachment_type = nullptr;
+    array_desc_->data->attachment.reset();
+    return;
+  }
+  array_desc_->data->attachment_type = type_tag;
+  array_desc_->data->attachment = std::move(attachment);
+}
+
+std::shared_ptr<void> array::data_attachment(const void* type_tag) const {
+  if (array_desc_->data == nullptr) {
+    return {};
+  }
+  if (
+      type_tag == nullptr || array_desc_->data->attachment == nullptr ||
+      array_desc_->data->attachment_type != type_tag) {
+    return {};
+  }
+  return array_desc_->data->attachment;
+}
+
 void array::set_data(
     allocator::Buffer buffer,
     size_t data_size,

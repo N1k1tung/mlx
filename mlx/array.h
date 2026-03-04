@@ -231,14 +231,21 @@ class MLX_API array {
   struct Data {
     allocator::Buffer buffer;
     Deleter d;
+    const void* attachment_type{nullptr};
+    std::shared_ptr<void> attachment{};
     Data(allocator::Buffer buffer, Deleter d = allocator::free)
         : buffer(buffer), d(d) {}
     // Not copyable
     Data(const Data& d) = delete;
     Data& operator=(const Data& d) = delete;
-    Data(Data&& o) : buffer(o.buffer), d(o.d) {
+    Data(Data&& o)
+        : buffer(o.buffer),
+          d(o.d),
+          attachment_type(o.attachment_type),
+          attachment(std::move(o.attachment)) {
       o.buffer = allocator::Buffer(nullptr);
       o.d = [](allocator::Buffer) {};
+      o.attachment_type = nullptr;
     }
     ~Data() {
       d(buffer);
@@ -437,6 +444,12 @@ class MLX_API array {
   bool is_tracer() const;
 
   void set_data(allocator::Buffer buffer, Deleter d = allocator::free);
+
+  void set_data_attachment(
+      const void* type_tag,
+      std::shared_ptr<void> attachment);
+
+  std::shared_ptr<void> data_attachment(const void* type_tag) const;
 
   void set_data(
       allocator::Buffer buffer,

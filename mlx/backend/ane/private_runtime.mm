@@ -900,6 +900,87 @@ IOSurfaceRef create_surface(size_t bytes) {
   return IOSurfaceCreate((__bridge CFDictionaryRef)props);
 }
 
+struct ANESurfaceAttachment {
+  IOSurfaceRef surface{nullptr};
+  size_t nbytes{0};
+
+  ~ANESurfaceAttachment() {
+    if (surface != nullptr) {
+      CFRelease(surface);
+    }
+  }
+};
+
+const void* ane_surface_attachment_type_tag() {
+  static const int tag = 0;
+  return &tag;
+}
+
+std::shared_ptr<ANESurfaceAttachment> get_ane_surface_attachment(const array& arr) {
+  auto attachment = arr.data_attachment(ane_surface_attachment_type_tag());
+  if (attachment == nullptr) {
+    return {};
+  }
+  return std::static_pointer_cast<ANESurfaceAttachment>(attachment);
+}
+
+IOSurfaceRef reusable_input_surface(const array& arr, size_t required_nbytes) {
+  if (arr.offset() != 0 || !arr.flags().row_contiguous) {
+    return nullptr;
+  }
+  auto attachment = get_ane_surface_attachment(arr);
+  if (attachment == nullptr || attachment->surface == nullptr) {
+    return nullptr;
+  }
+  if (attachment->nbytes < required_nbytes) {
+    return nullptr;
+  }
+  return attachment->surface;
+}
+
+bool bind_output_surface_to_array(
+    array& out,
+    IOSurfaceRef surface,
+    size_t surface_nbytes) {
+  if (surface == nullptr || out.offset() != 0 || !out.flags().row_contiguous) {
+    return false;
+  }
+  IOSurfaceLock(surface, 0, nullptr);
+  void* base = IOSurfaceGetBaseAddress(surface);
+  if (base == nullptr) {
+    IOSurfaceUnlock(surface, 0, nullptr);
+    return false;
+  }
+  auto wrapped = allocator::make_buffer(base, surface_nbytes);
+  IOSurfaceUnlock(surface, 0, nullptr);
+  if (wrapped.ptr() == nullptr) {
+    return false;
+  }
+
+  // Keep IOSurface alive with the array data lifetime.
+  CFRetain(surface);
+  auto attachment = std::make_shared<ANESurfaceAttachment>();
+  attachment->surface = surface;
+  attachment->nbytes = surface_nbytes;
+
+  out.set_data(
+      wrapped,
+      [attachment](allocator::Buffer buffer) {
+        allocator::release(buffer);
+      });
+  out.set_data_attachment(ane_surface_attachment_type_tag(), attachment);
+  return true;
+}
+
+void release_surfaces(std::vector<IOSurfaceRef>& surfaces) {
+  for (auto& surface : surfaces) {
+    if (surface != nullptr) {
+      CFRelease(surface);
+      surface = nullptr;
+    }
+  }
+}
+
 NSString* create_mil_model_dir(const std::string& mil, std::string& reason) {
   NSString* dir = [NSTemporaryDirectory()
       stringByAppendingPathComponent:[NSString
@@ -1049,12 +1130,9 @@ struct Program {
   id __strong client{nil};
   id __strong model{nil};
   NSString* __strong model_dir{nil};
-  NSArray* __strong input_wrappers{nil};
   NSArray* __strong input_indices{nil};
-  NSArray* __strong output_wrappers{nil};
   NSArray* __strong output_indices{nil};
   std::vector<IOSurfaceRef> input_surfaces;
-  std::vector<IOSurfaceRef> output_surfaces;
   std::vector<size_t> input_nbytes;
   std::vector<size_t> output_nbytes;
 
@@ -1065,11 +1143,6 @@ struct Program {
           client, @selector(unloadModel:options:qos:error:), model, nil, kQoS, &e);
     }
     for (auto s : input_surfaces) {
-      if (s != nullptr) {
-        CFRelease(s);
-      }
-    }
-    for (auto s : output_surfaces) {
       if (s != nullptr) {
         CFRelease(s);
       }
@@ -1291,7 +1364,6 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
   prog->input_nbytes.reserve(arr.inputs().size());
   prog->output_nbytes.reserve(outputs.size());
   prog->input_surfaces.reserve(arr.inputs().size());
-  prog->output_surfaces.reserve(outputs.size());
   uint64_t alloc_begin_ns = 0;
   if (profile_scope.enabled) {
     alloc_begin_ns = now_ns();
@@ -1311,56 +1383,23 @@ std::shared_ptr<Program> compile(const array& arr, std::string* reason) {
   DRUNTIME_LOG("compile step: input IOSurfaces allocated");
   for (const auto& out : outputs) {
     prog->output_nbytes.push_back(out.nbytes());
-    auto surface = create_surface(out.nbytes());
-    if (surface == nullptr) {
-      if (reason) {
-        *reason = "output-surface-create-failed";
-      }
-      return nullptr;
-    }
-    prog->output_surfaces.push_back(surface);
   }
-  DRUNTIME_LOG("compile step: output IOSurfaces allocated");
   if (profile_scope.enabled) {
     profile_scope.alloc_ns += now_ns() - alloc_begin_ns;
   }
 
-  NSMutableArray* input_wrappers =
-      [NSMutableArray arrayWithCapacity:prog->input_surfaces.size()];
   NSMutableArray* input_indices =
       [NSMutableArray arrayWithCapacity:prog->input_surfaces.size()];
   for (size_t i = 0; i < prog->input_surfaces.size(); ++i) {
-    id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
-        s.iosurface_cls, @selector(objectWithIOSurface:), prog->input_surfaces[i]);
-    if (wrapped == nil) {
-      if (reason) {
-        *reason = "compile-input-wrap-failed";
-      }
-      return nullptr;
-    }
-    [input_wrappers addObject:wrapped];
     [input_indices addObject:@(i)];
   }
-  prog->input_wrappers = [input_wrappers copy];
   prog->input_indices = [input_indices copy];
 
-  NSMutableArray* output_wrappers =
-      [NSMutableArray arrayWithCapacity:prog->output_surfaces.size()];
   NSMutableArray* output_indices =
-      [NSMutableArray arrayWithCapacity:prog->output_surfaces.size()];
-  for (size_t i = 0; i < prog->output_surfaces.size(); ++i) {
-    id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
-        s.iosurface_cls, @selector(objectWithIOSurface:), prog->output_surfaces[i]);
-    if (wrapped == nil) {
-      if (reason) {
-        *reason = "compile-output-wrap-failed";
-      }
-      return nullptr;
-    }
-    [output_wrappers addObject:wrapped];
+      [NSMutableArray arrayWithCapacity:prog->output_nbytes.size()];
+  for (size_t i = 0; i < prog->output_nbytes.size(); ++i) {
     [output_indices addObject:@(i)];
   }
-  prog->output_wrappers = [output_wrappers copy];
   prog->output_indices = [output_indices copy];
 
   if (reason) {
@@ -1386,51 +1425,70 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
     return false;
   }
-  if (outputs.size() != program.output_surfaces.size()) {
+  if (outputs.size() != program.output_nbytes.size()) {
     if (reason) {
       *reason = "output-count-mismatch";
     }
     return false;
   }
-  if (
-      program.input_wrappers == nil || program.input_indices == nil ||
-      program.output_wrappers == nil || program.output_indices == nil) {
+  if (program.input_indices == nil || program.output_indices == nil) {
     if (reason) {
-      *reason = "program-wrappers-missing";
+      *reason = "program-indices-missing";
     }
     return false;
   }
 
-  @autoreleasepool {
-    DRUNTIME_LOG("dispatch start: staging inputs");
-    bool needs_sync = false;
-    for (const auto& in : inputs) {
-      if (!in.is_available()) {
-        needs_sync = true;
-        break;
+  std::vector<IOSurfaceRef> resolved_input_surfaces(inputs.size(), nullptr);
+  std::vector<bool> input_needs_copy(inputs.size(), false);
+  bool needs_sync = false;
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    const auto& in = inputs[i];
+    if (in.status() == array::Status::unscheduled) {
+      if (reason) {
+        *reason = "input-unscheduled-at-dispatch:" + std::to_string(i);
       }
-    }
-    if (needs_sync) {
-      DRUNTIME_LOG("dispatch staging pre-sync begin");
-      const uint64_t sync_begin_ns = profile_scope.enabled ? now_ns() : 0;
-      gpu::synchronize(arr.primitive().stream());
-      if (profile_scope.enabled) {
-        profile_scope.pre_sync_ns += now_ns() - sync_begin_ns;
-      }
-      DRUNTIME_LOG("dispatch staging pre-sync complete");
+      return false;
     }
 
+    auto reused = reusable_input_surface(in, program.input_nbytes[i]);
+    if (reused != nullptr) {
+      resolved_input_surfaces[i] = reused;
+      continue;
+    }
+
+    input_needs_copy[i] = true;
+    resolved_input_surfaces[i] = program.input_surfaces[i];
+    if (!in.is_available()) {
+      needs_sync = true;
+    }
+  }
+
+  if (needs_sync) {
+    DRUNTIME_LOG("dispatch staging pre-sync begin");
+    const uint64_t sync_begin_ns = profile_scope.enabled ? now_ns() : 0;
+    gpu::synchronize(arr.primitive().stream());
+    if (profile_scope.enabled) {
+      profile_scope.pre_sync_ns += now_ns() - sync_begin_ns;
+    }
+    DRUNTIME_LOG("dispatch staging pre-sync complete");
+  }
+
+  std::vector<IOSurfaceRef> dispatch_output_surfaces(outputs.size(), nullptr);
+  auto release_dispatch_outputs = [&]() { release_surfaces(dispatch_output_surfaces); };
+
+  @autoreleasepool {
+    DRUNTIME_LOG("dispatch start: staging inputs");
     for (size_t i = 0; i < inputs.size(); ++i) {
       auto& in = inputs[i];
       DRUNTIME_LOG_LAZY([&]() {
         return "dispatch stage input[" + std::to_string(i) +
             "] begin status=" + std::to_string(static_cast<int>(in.status()));
       });
-      if (in.status() == array::Status::unscheduled) {
-        if (reason) {
-          *reason = "input-unscheduled-at-dispatch:" + std::to_string(i);
-        }
-        return false;
+      if (!input_needs_copy[i]) {
+        DRUNTIME_LOG_LAZY([&]() {
+          return "dispatch stage input[" + std::to_string(i) + "] reused";
+        });
+        continue;
       }
       if (!in.is_available()) {
         if (strict_input_ready_mode()) {
@@ -1451,33 +1509,84 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         }
         return false;
       }
-      auto surface = program.input_surfaces[i];
+      auto surface = resolved_input_surfaces[i];
+      if (surface == nullptr) {
+        if (reason) {
+          *reason = "input-surface-null:" + std::to_string(i);
+        }
+        return false;
+      }
       const size_t copy_nbytes = std::min(in.nbytes(), program.input_nbytes[i]);
       const uint64_t input_copy_begin_ns = profile_scope.enabled ? now_ns() : 0;
       IOSurfaceLock(surface, 0, nullptr);
-      std::memcpy(
-          IOSurfaceGetBaseAddress(surface),
-          src,
-          copy_nbytes);
+      auto* dst = IOSurfaceGetBaseAddress(surface);
+      if (dst == nullptr) {
+        IOSurfaceUnlock(surface, 0, nullptr);
+        if (reason) {
+          *reason = "input-surface-base-null:" + std::to_string(i);
+        }
+        return false;
+      }
+      std::memcpy(dst, src, copy_nbytes);
       IOSurfaceUnlock(surface, 0, nullptr);
       if (profile_scope.enabled) {
         profile_scope.input_copy_ns += now_ns() - input_copy_begin_ns;
         profile_scope.input_copy_bytes += copy_nbytes;
       }
-      DRUNTIME_LOG_LAZY(
-          [&]() { return "dispatch stage input[" + std::to_string(i) + "] complete"; });
+      DRUNTIME_LOG_LAZY([&]() {
+        return "dispatch stage input[" + std::to_string(i) + "] copied";
+      });
     }
-    DRUNTIME_LOG("dispatch memcpy to IOSurfaces complete");
+    DRUNTIME_LOG("dispatch input staging complete");
 
     auto& s = runtime_state();
     DRUNTIME_LOG("dispatch request build begin");
     const uint64_t request_build_begin_ns = profile_scope.enabled ? now_ns() : 0;
+
+    NSMutableArray* input_wrappers =
+        [NSMutableArray arrayWithCapacity:resolved_input_surfaces.size()];
+    for (size_t i = 0; i < resolved_input_surfaces.size(); ++i) {
+      id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
+          s.iosurface_cls, @selector(objectWithIOSurface:), resolved_input_surfaces[i]);
+      if (wrapped == nil) {
+        if (reason) {
+          *reason = "request-input-wrap-failed:" + std::to_string(i);
+        }
+        return false;
+      }
+      [input_wrappers addObject:wrapped];
+    }
+
+    NSMutableArray* output_wrappers =
+        [NSMutableArray arrayWithCapacity:dispatch_output_surfaces.size()];
+    for (size_t i = 0; i < dispatch_output_surfaces.size(); ++i) {
+      auto surface = create_surface(program.output_nbytes[i]);
+      if (surface == nullptr) {
+        if (reason) {
+          *reason = "dispatch-output-surface-create-failed:" + std::to_string(i);
+        }
+        release_dispatch_outputs();
+        return false;
+      }
+      dispatch_output_surfaces[i] = surface;
+      id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
+          s.iosurface_cls, @selector(objectWithIOSurface:), surface);
+      if (wrapped == nil) {
+        if (reason) {
+          *reason = "request-output-wrap-failed:" + std::to_string(i);
+        }
+        release_dispatch_outputs();
+        return false;
+      }
+      [output_wrappers addObject:wrapped];
+    }
+
     id request_obj = ((id(*)(Class, SEL, id, id, id, id, id, id, id))objc_msgSend)(
         s.request_cls,
         @selector(requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:),
-        program.input_wrappers,
+        input_wrappers,
         program.input_indices,
-        program.output_wrappers,
+        output_wrappers,
         program.output_indices,
         nil,
         nil,
@@ -1489,6 +1598,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       if (reason) {
         *reason = "request-create-failed";
       }
+      release_dispatch_outputs();
       return false;
     }
 
@@ -1512,6 +1622,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
         *reason = e ? std::string([[e description] UTF8String])
                     : std::string("evaluate-failed-no-error");
       }
+      release_dispatch_outputs();
       return false;
     }
   }
@@ -1520,6 +1631,14 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     auto& out = outputs[i];
     DRUNTIME_LOG_LAZY(
         [&]() { return "dispatch output[" + std::to_string(i) + "] begin"; });
+    auto surface = dispatch_output_surfaces[i];
+    if (bind_output_surface_to_array(out, surface, program.output_nbytes[i])) {
+      DRUNTIME_LOG_LAZY([&]() {
+        return "dispatch output[" + std::to_string(i) + "] bound";
+      });
+      continue;
+    }
+
     auto data_ref = out.data_shared_ptr();
     bool need_alloc = (data_ref == nullptr || data_ref->buffer.ptr() == nullptr);
     if (!need_alloc) {
@@ -1533,9 +1652,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       if (reason) {
         *reason = "output-data-null:" + std::to_string(i);
       }
+      release_dispatch_outputs();
       return false;
     }
-    auto surface = program.output_surfaces[i];
     IOSurfaceLock(surface, kIOSurfaceLockReadOnly, nullptr);
     auto* src = IOSurfaceGetBaseAddress(surface);
     if (src == nullptr) {
@@ -1543,24 +1662,23 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
       if (reason) {
         *reason = "output-surface-base-null:" + std::to_string(i);
       }
+      release_dispatch_outputs();
       return false;
     }
     const size_t copy_nbytes = std::min(out.nbytes(), program.output_nbytes[i]);
     const uint64_t output_copy_begin_ns = profile_scope.enabled ? now_ns() : 0;
-    std::memcpy(
-        dst,
-        src,
-        copy_nbytes);
+    std::memcpy(dst, src, copy_nbytes);
     IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
     if (profile_scope.enabled) {
       profile_scope.output_copy_ns += now_ns() - output_copy_begin_ns;
       profile_scope.output_copy_bytes += copy_nbytes;
     }
     DRUNTIME_LOG_LAZY([&]() {
-      return "dispatch output[" + std::to_string(i) + "] complete";
+      return "dispatch output[" + std::to_string(i) + "] copied";
     });
   }
-  DRUNTIME_LOG("dispatch output copy complete");
+  release_dispatch_outputs();
+  DRUNTIME_LOG("dispatch output processing complete");
 
   if (reason) {
     *reason = "ok";
