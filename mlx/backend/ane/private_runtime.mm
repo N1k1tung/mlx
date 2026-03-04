@@ -442,6 +442,20 @@ bool build_mil(
       reason = "binary-op-arity-mismatch";
       return false;
     }
+    // Keep binary ANE coverage conservative: fp16 only and no broadcast.
+    // This avoids opaque ANE compile failures for mixed dtype/broadcast forms.
+    if (
+        inputs[0].dtype() != float16 || inputs[1].dtype() != float16 ||
+        arr.dtype() != float16) {
+      reason = "binary-op-unsupported-dtype";
+      return false;
+    }
+    if (
+        input_shapes_mil[0] != input_shapes_mil[1] ||
+        input_shapes_mil[0] != out_shape_mil) {
+      reason = "binary-op-broadcast-unsupported";
+      return false;
+    }
     auto in0_dtype = mil_dtype(inputs[0].dtype());
     auto in1_dtype = mil_dtype(inputs[1].dtype());
     if (in0_dtype == nullptr || in1_dtype == nullptr) {
