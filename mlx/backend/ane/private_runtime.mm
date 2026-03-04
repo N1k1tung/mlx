@@ -1297,6 +1297,18 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
     return false;
   }
 
+  auto& primitive = arr.primitive();
+  if (!is_metadata_fastpath_primitive(primitive)) {
+    return false;
+  }
+  auto* unary = dynamic_cast<UnaryPrimitive*>(&primitive);
+  if (unary == nullptr) {
+    if (reason) {
+      *reason = "metadata-fastpath-not-unary";
+    }
+    return false;
+  }
+
   const auto& inputs = arr.inputs();
   for (size_t i = 0; i < inputs.size(); ++i) {
     if (inputs[i].status() == array::Status::unscheduled) {
@@ -1331,18 +1343,6 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
           });
         }
       }
-  }
-
-  auto& primitive = arr.primitive();
-  if (!is_metadata_fastpath_primitive(primitive)) {
-    return false;
-  }
-  auto* unary = dynamic_cast<UnaryPrimitive*>(&primitive);
-  if (unary == nullptr) {
-    if (reason) {
-      *reason = "metadata-fastpath-not-unary";
-    }
-    return false;
   }
 
   const uint64_t begin_ns = profile_mode() ? now_ns() : 0;
