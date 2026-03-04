@@ -8,6 +8,15 @@
 
 namespace mlx::core::ane {
 
+bool is_metadata_fastpath_primitive(const Primitive& p) {
+  return typeid(p) == typeid(Reshape) ||
+      typeid(p) == typeid(ExpandDims) ||
+      typeid(p) == typeid(Squeeze) ||
+      typeid(p) == typeid(Transpose) ||
+      typeid(p) == typeid(Slice) ||
+      typeid(p) == typeid(Contiguous);
+}
+
 bool supports_ane(const Primitive& p) {
   // Keep allowlist aligned with concrete MIL generation in private_runtime.mm.
   return typeid(p) == typeid(Add) || typeid(p) == typeid(Subtract) ||

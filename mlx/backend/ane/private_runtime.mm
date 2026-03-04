@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "mlx/allocator.h"
+#include "mlx/backend/ane/support.h"
 #include "mlx/backend/gpu/eval.h"
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
@@ -389,15 +390,6 @@ const char* mil_dtype(Dtype dtype) {
 
 bool io_layout_supported(const array& arr) {
   return arr.flags().row_contiguous;
-}
-
-bool is_metadata_fastpath_primitive(const Primitive& primitive) {
-  return typeid(primitive) == typeid(Reshape) ||
-      typeid(primitive) == typeid(ExpandDims) ||
-      typeid(primitive) == typeid(Squeeze) ||
-      typeid(primitive) == typeid(Transpose) ||
-      typeid(primitive) == typeid(Slice) ||
-      typeid(primitive) == typeid(Contiguous);
 }
 
 bool build_mil(
@@ -1072,7 +1064,7 @@ bool dispatch_fastpath(array& arr, std::string* reason) {
     return false;
   }
 
-  auto inputs = arr.inputs();
+  const auto& inputs = arr.inputs();
   for (size_t i = 0; i < inputs.size(); ++i) {
     if (inputs[i].status() == array::Status::unscheduled) {
       if (reason) {
@@ -1311,7 +1303,7 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
     return false;
   }
-  auto inputs = arr.inputs();
+  const auto& inputs = arr.inputs();
   auto outputs = arr.outputs();
   if (inputs.size() != program.input_surfaces.size()) {
     if (reason) {
