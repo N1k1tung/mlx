@@ -121,7 +121,7 @@ inline bool strict_input_ready_mode() {
 }
 
 inline int profile_every_dispatches() {
-  static int value = std::max(0, env::get_var("MLX_ANE_PROFILE_EVERY", 0));
+  static int value = std::max(0, env::get_var("MLX_ANE_PROFILE_EVERY", 1000));
   return value;
 }
 

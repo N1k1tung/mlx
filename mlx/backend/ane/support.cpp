@@ -214,6 +214,13 @@ bool supports_ane(const array& arr) {
   if (!supports_ane(primitive)) {
     return false;
   }
+
+  // Metadata fastpath primitives execute through private_runtime::dispatch_fastpath
+  // (unary->eval_cpu) and do not require ANE runtime IO layout constraints.
+  if (is_metadata_fastpath_primitive(primitive)) {
+    return arr.inputs().size() == 1;
+  }
+
   auto outputs = arr.outputs();
   if (outputs.size() != 1) {
     return false;
