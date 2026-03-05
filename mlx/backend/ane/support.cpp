@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <typeinfo>
 
 #include "mlx/fast_primitives.h"
@@ -62,6 +63,15 @@ bool binary_runtime_supported(const array& arr) {
   }
   return inputs[0].shape() == inputs[1].shape() &&
       inputs[0].shape() == arr.shape();
+}
+
+bool is_compiled_sigmoid_multiply_primitive(const Primitive& p) {
+  const char* name = p.name();
+  if (name == nullptr) {
+    return false;
+  }
+  return std::strcmp(name, "CompiledSigmoidMultiply") == 0 ||
+      std::strstr(name, "SigmoidMultiply") != nullptr;
 }
 
 bool transpose_runtime_supported(const array& arr) {
@@ -206,7 +216,8 @@ bool supports_ane(const Primitive& p) {
       typeid(p) == typeid(Transpose) || typeid(p) == typeid(Concatenate) ||
       typeid(p) == typeid(Slice) || typeid(p) == typeid(Sigmoid) ||
       typeid(p) == typeid(Contiguous) || typeid(p) == typeid(Flatten) ||
-      typeid(p) == typeid(Unflatten) || typeid(p) == typeid(fast::RMSNorm);
+      typeid(p) == typeid(Unflatten) || typeid(p) == typeid(fast::RMSNorm) ||
+      is_compiled_sigmoid_multiply_primitive(p);
 }
 
 bool supports_ane(const array& arr) {
@@ -239,7 +250,8 @@ bool supports_ane(const array& arr) {
 
   if (
       typeid(primitive) == typeid(Add) || typeid(primitive) == typeid(Subtract) ||
-      typeid(primitive) == typeid(Multiply) || typeid(primitive) == typeid(Divide)) {
+      typeid(primitive) == typeid(Multiply) || typeid(primitive) == typeid(Divide) ||
+      is_compiled_sigmoid_multiply_primitive(primitive)) {
     return binary_runtime_supported(arr);
   }
   if (typeid(primitive) == typeid(Sigmoid) || typeid(primitive) == typeid(Softmax)) {

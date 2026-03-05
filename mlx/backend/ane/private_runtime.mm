@@ -413,6 +413,15 @@ bool io_layout_supported(const array& arr) {
   return arr.flags().row_contiguous;
 }
 
+bool is_compiled_sigmoid_multiply_primitive(const Primitive& p) {
+  const char* name = p.name();
+  if (name == nullptr) {
+    return false;
+  }
+  return std::strcmp(name, "CompiledSigmoidMultiply") == 0 ||
+      std::strstr(name, "SigmoidMultiply") != nullptr;
+}
+
 bool fastpath_requires_materialized_input(array& arr) {
   auto& primitive = arr.primitive();
   const auto& inputs = arr.inputs();
@@ -534,6 +543,45 @@ bool build_mil(
     return true;
   };
 
+  auto emit_sigmoid_multiply = [&]() -> bool {
+    if (inputs.size() != 2) {
+      reason = "sigmoid-multiply-arity-mismatch";
+      return false;
+    }
+    if (
+        inputs[0].dtype() != float16 || inputs[1].dtype() != float16 ||
+        arr.dtype() != float16) {
+      reason = "sigmoid-multiply-unsupported-dtype";
+      return false;
+    }
+    if (
+        input_shapes_mil[0] != input_shapes_mil[1] ||
+        input_shapes_mil[0] != out_shape_mil) {
+      reason = "sigmoid-multiply-broadcast-unsupported";
+      return false;
+    }
+    auto in0_dtype = mil_dtype(inputs[0].dtype());
+    auto in1_dtype = mil_dtype(inputs[1].dtype());
+    if (in0_dtype == nullptr || in1_dtype == nullptr) {
+      reason = "unsupported-input-dtype-token";
+      return false;
+    }
+    std::ostringstream os;
+    os << "program(1.3)\n" << kBuildInfo
+       << "{\n"
+       << "    func main<ios18>(tensor<" << in0_dtype << ", "
+       << shape_to_mil(input_shapes_mil[0]) << "> x, tensor<" << in1_dtype
+       << ", " << shape_to_mil(input_shapes_mil[1]) << "> y) {\n"
+       << "        tensor<" << in0_dtype << ", " << shape_to_mil(input_shapes_mil[0])
+       << "> sx = sigmoid(x = x)[name = string(\"sg\")];\n"
+       << "        tensor<" << out_dtype << ", " << shape_to_mil(out_shape_mil)
+       << "> out = mul(x = sx, y = y)[name = string(\"ane_op\")];\n"
+       << "    } -> (out);\n"
+       << "}\n";
+    mil = os.str();
+    return true;
+  };
+
   auto emit_unary = [&](const char* op_name) -> bool {
     if (inputs.size() != 1) {
       reason = "unary-op-arity-mismatch";
@@ -602,6 +650,9 @@ bool build_mil(
   }
   if (typeid(primitive) == typeid(Sigmoid)) {
     return emit_unary("sigmoid");
+  }
+  if (is_compiled_sigmoid_multiply_primitive(primitive)) {
+    return emit_sigmoid_multiply();
   }
 
   if (
