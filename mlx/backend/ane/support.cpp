@@ -6,6 +6,7 @@
 #include <array>
 #include <cstring>
 #include <typeinfo>
+#include <iostream>
 
 #include "mlx/fast_primitives.h"
 #include "mlx/primitives.h"
@@ -63,15 +64,6 @@ bool binary_runtime_supported(const array& arr) {
   }
   return inputs[0].shape() == inputs[1].shape() &&
       inputs[0].shape() == arr.shape();
-}
-
-bool is_compiled_sigmoid_multiply_primitive(const Primitive& p) {
-  const char* name = p.name();
-  if (name == nullptr) {
-    return false;
-  }
-  return std::strcmp(name, "CompiledSigmoidMultiply") == 0 ||
-      std::strstr(name, "SigmoidMultiply") != nullptr;
 }
 
 bool transpose_runtime_supported(const array& arr) {
@@ -283,6 +275,15 @@ bool supports_ane(const array& arr) {
   }
 
   return false;
+}
+
+bool is_compiled_sigmoid_multiply_primitive(const Primitive& p) {
+    const char* name = p.name();
+    if (name == nullptr) {
+        return false;
+    }
+
+    return std::strcmp(name, "CompiledSigmoidMultiply") == 0;
 }
 
 } // namespace mlx::core::ane

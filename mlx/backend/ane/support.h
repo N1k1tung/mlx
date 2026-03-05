@@ -13,6 +13,7 @@ bool supports_ane(const Primitive& p);
 bool supports_ane(const array& arr);
 bool is_metadata_fastpath_primitive(const Primitive& p);
 bool is_view_only_fastpath_primitive(const Primitive& p);
+bool is_compiled_sigmoid_multiply_primitive(const Primitive& p);
 
 } // namespace ane
 } // namespace mlx::core

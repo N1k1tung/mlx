@@ -413,15 +413,6 @@ bool io_layout_supported(const array& arr) {
   return arr.flags().row_contiguous;
 }
 
-bool is_compiled_sigmoid_multiply_primitive(const Primitive& p) {
-  const char* name = p.name();
-  if (name == nullptr) {
-    return false;
-  }
-  return std::strcmp(name, "CompiledSigmoidMultiply") == 0 ||
-      std::strstr(name, "SigmoidMultiply") != nullptr;
-}
-
 bool fastpath_requires_materialized_input(array& arr) {
   auto& primitive = arr.primitive();
   const auto& inputs = arr.inputs();
