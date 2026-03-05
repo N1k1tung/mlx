@@ -541,6 +541,18 @@ bool Runtime::should_use_iosurface() const {
   return use_iosurface;
 }
 
+bool Runtime::pin_to_surface(array& arr) {
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    (void)try_initialize_runtime();
+    if (!runtime_available_) {
+      return false;
+    }
+  }
+  std::string reason;
+  return private_runtime::pin_to_surface(arr, &reason);
+}
+
 DispatchResult Runtime::dispatch(array& arr) {
   RuntimeDispatchProfileScope profile_scope;
   if (is_metadata_fastpath_primitive(arr.primitive())) {

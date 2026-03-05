@@ -42,6 +42,7 @@ class Runtime {
   std::string runtime_unavailable_reason();
 
   DispatchResult dispatch(array& arr);
+  bool pin_to_surface(array& arr);
 
  private:
   Runtime() = default;

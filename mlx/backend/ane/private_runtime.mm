@@ -1947,6 +1947,107 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
   return true;
 }
 
+bool pin_to_surface(array& arr, std::string* reason) {
+  std::lock_guard<std::mutex> lk(runtime_mutex());
+
+  std::string init_reason;
+  if (!initialize_locked(&init_reason)) {
+    if (reason) {
+      *reason = init_reason;
+    }
+    return false;
+  }
+
+  if (arr.offset() != 0 || !arr.flags().row_contiguous) {
+    if (reason) {
+      *reason = "not-row-contiguous-or-offset";
+    }
+    return false;
+  }
+
+  if (get_ane_surface_attachment(arr) != nullptr) {
+    if (reason) {
+      *reason = "ok";
+    }
+    return true;
+  }
+
+  if (arr.status() == array::Status::unscheduled) {
+    if (reason) {
+      *reason = "array-unscheduled";
+    }
+    return false;
+  }
+  if (!arr.is_available()) {
+    if (reason) {
+      *reason = "array-not-available";
+    }
+    return false;
+  }
+
+  auto* src = arr.data<char>();
+  if (src == nullptr) {
+    if (reason) {
+      *reason = "array-data-null";
+    }
+    return false;
+  }
+
+  const size_t nbytes = arr.nbytes();
+  auto& s = runtime_state();
+  ANESurfaceAttachment::SurfaceHandle handle{};
+  if (!create_surface_handle(s, nbytes, handle)) {
+    if (reason) {
+      *reason = "surface-create-failed";
+    }
+    return false;
+  }
+
+  IOSurfaceLock(handle.surface, 0, nullptr);
+  void* dst = IOSurfaceGetBaseAddress(handle.surface);
+  if (dst == nullptr) {
+    IOSurfaceUnlock(handle.surface, 0, nullptr);
+    CFRelease(handle.surface);
+    handle.surface = nullptr;
+    handle.wrapper = nil;
+    if (reason) {
+      *reason = "surface-base-null";
+    }
+    return false;
+  }
+  if (nbytes > 0) {
+    std::memcpy(dst, src, nbytes);
+  }
+  IOSurfaceUnlock(handle.surface, 0, nullptr);
+
+  auto wrapped = allocator::make_buffer(dst, std::max<size_t>(nbytes, 1));
+  if (wrapped.ptr() == nullptr) {
+    CFRelease(handle.surface);
+    handle.surface = nullptr;
+    handle.wrapper = nil;
+    if (reason) {
+      *reason = "buffer-wrap-failed";
+    }
+    return false;
+  }
+
+  auto attachment = std::make_shared<ANESurfaceAttachment>();
+  attachment->handle = handle;
+  attachment->nbytes = nbytes;
+
+  arr.set_data(
+      wrapped,
+      [attachment](allocator::Buffer buffer) {
+        allocator::release(buffer);
+      });
+  arr.set_data_attachment(ane_surface_attachment_type_tag(), attachment);
+
+  if (reason) {
+    *reason = "ok";
+  }
+  return true;
+}
+
 #undef DRUNTIME_LOG
 #undef DRUNTIME_LOG_LAZY
 
@@ -1980,6 +2081,13 @@ bool dispatch_fastpath(array&, std::string* reason) {
 }
 
 bool dispatch(Program&, array&, std::string* reason) {
+  if (reason) {
+    *reason = "private-runtime-not-available-on-this-platform";
+  }
+  return false;
+}
+
+bool pin_to_surface(array&, std::string* reason) {
   if (reason) {
     *reason = "private-runtime-not-available-on-this-platform";
   }
