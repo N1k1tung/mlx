@@ -1,5 +1,3 @@
-// Copyright © 2026 Apple Inc.
-
 #include "mlx/backend/ane/private_runtime.h"
 
 #if defined(__APPLE__)

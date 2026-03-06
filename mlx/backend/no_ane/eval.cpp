@@ -1,5 +1,3 @@
-// Copyright © 2026 Apple Inc.
-
 #include <stdexcept>
 
 #include "mlx/backend/ane/eval.h"

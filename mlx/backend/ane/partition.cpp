@@ -1,5 +1,3 @@
-// Copyright © 2026 Apple Inc.
-
 #include "mlx/backend/ane/partition.h"
 
 #include <mutex>

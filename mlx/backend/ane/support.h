@@ -1,5 +1,3 @@
-// Copyright © 2026 Apple Inc.
-
 #pragma once
 
 namespace mlx::core {

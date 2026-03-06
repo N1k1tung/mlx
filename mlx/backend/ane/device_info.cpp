@@ -1,5 +1,3 @@
-// Copyright © 2026 Apple Inc.
-
 #include "mlx/backend/ane/device_info.h"
 #include "mlx/backend/gpu/device_info.h"
 

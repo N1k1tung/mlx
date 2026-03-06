@@ -1,5 +1,3 @@
-// Copyright © 2026 Apple Inc.
-
 #include "mlx/backend/ane/runtime.h"
 
 #include <algorithm>
