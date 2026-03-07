@@ -63,7 +63,6 @@ class Runtime {
 
   std::string make_cache_key(const array& arr) const;
   std::shared_ptr<CompiledProgram> get_or_compile(const array& arr);
-  bool should_use_iosurface() const;
   bool try_initialize_runtime();
   bool program_matches(const CompiledProgram& program, const array& arr) const;
 

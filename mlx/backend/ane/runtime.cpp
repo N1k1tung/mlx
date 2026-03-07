@@ -10,7 +10,6 @@
 #include <sstream>
 
 #include "mlx/backend/ane/diagnostics.h"
-#include "mlx/backend/ane/memory.h"
 #include "mlx/backend/ane/private_runtime.h"
 #include "mlx/backend/ane/support.h"
 #include "mlx/backend/gpu/device_info.h"
@@ -534,11 +533,6 @@ bool Runtime::try_initialize_runtime() {
   return runtime_available_;
 }
 
-bool Runtime::should_use_iosurface() const {
-  static bool use_iosurface = env::get_var("MLX_ANE_ENABLE_IOSURFACE", 0) == 1;
-  return use_iosurface;
-}
-
 bool Runtime::pin_to_surface(array& arr) {
   {
     std::lock_guard<std::mutex> lk(mutex_);
@@ -586,18 +580,6 @@ DispatchResult Runtime::dispatch(array& arr) {
   }
   if (profile_scope.enabled) {
     profile_scope.lock_ns += now_ns() - lock_begin_ns;
-  }
-
-  // Build explicit IOSurface bindings when requested so buffer wrapping is
-  // validated even before private-runtime dispatch is fully integrated.
-  if (should_use_iosurface()) {
-    const uint64_t wrap_begin_ns = profile_scope.enabled ? now_ns() : 0;
-    for (const auto& in : arr.inputs()) {
-      (void)wrap_array_to_surface(in);
-    }
-    if (profile_scope.enabled) {
-      profile_scope.iosurface_wrap_ns += now_ns() - wrap_begin_ns;
-    }
   }
 
   if (runtime_available_ && program && program->native_program) {
