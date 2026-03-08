@@ -109,7 +109,7 @@ inline bool profile_mode() {
 }
 
 inline bool metadata_fastpath_enabled() {
-  static bool enabled = env::get_var("MLX_ANE_METADATA_FASTPATH", 0) == 1;
+  static bool enabled = env::get_var("MLX_ANE_METADATA_FASTPATH", 1) == 1;
   return enabled;
 }
 
@@ -1768,14 +1768,16 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
 
   std::vector<ANESurfaceAttachment::SurfaceHandle> resolved_input_handles(inputs.size());
   bool needs_sync = false;
-  std::vector<int> sync_stream_indices;
-  auto add_sync_stream = [&](int stream_index) {
-    if (
-        std::find(
-            sync_stream_indices.begin(),
-            sync_stream_indices.end(),
-            stream_index) == sync_stream_indices.end()) {
-      sync_stream_indices.push_back(stream_index);
+  std::vector<Stream> sync_streams;
+  auto add_sync_stream = [&](Stream stream) {
+    auto it = std::find_if(
+        sync_streams.begin(),
+        sync_streams.end(),
+        [&](const Stream& existing) {
+          return existing.index == stream.index && existing.device == stream.device;
+        });
+    if (it == sync_streams.end()) {
+      sync_streams.push_back(stream);
     }
   };
   for (size_t i = 0; i < inputs.size(); ++i) {
@@ -1790,19 +1792,30 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     if (!in.is_available()) {
       needs_sync = true;
       if (in.event().valid()) {
-        add_sync_stream(in.event().stream().index);
+        add_sync_stream(in.event().stream());
+      } else {
+        add_sync_stream(arr.primitive().stream());
       }
+    }
+
+    // In synchronous eval() mode, upstream GPU fallback kernels may not expose
+    // an event even though writes are still in-flight on the stream. If this
+    // input is not already backed by a reusable ANE surface attachment, force a
+    // stream boundary sync before aliasing host-visible bytes into ANE IO.
+    if (reusable_input_attachment(in, program.input_nbytes[i]) == nullptr) {
+      needs_sync = true;
+      add_sync_stream(arr.primitive().stream());
     }
   }
 
   if (needs_sync) {
     DRUNTIME_LOG("dispatch staging pre-sync begin");
-    if (sync_stream_indices.empty()) {
-      add_sync_stream(arr.primitive().stream().index);
+    if (sync_streams.empty()) {
+      add_sync_stream(arr.primitive().stream());
     }
-    for (auto stream_index : sync_stream_indices) {
+    for (const auto& stream : sync_streams) {
       const uint64_t sync_begin_ns = profile_scope.enabled ? now_ns() : 0;
-      gpu::synchronize(Stream(stream_index, Device::gpu));
+      gpu::synchronize(stream);
       if (profile_scope.enabled) {
         const uint64_t dt = now_ns() - sync_begin_ns;
         profile_scope.pre_sync_ns += dt;
