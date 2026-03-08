@@ -1,7 +1,7 @@
 #include "mlx/backend/ane/memory.h"
 
 #include <algorithm>
-#include <cstring>
+#include <cstdint>
 #include <stdexcept>
 
 #include "mlx/allocator.h"
@@ -79,6 +79,51 @@ IOSurfaceRef create_surface(size_t bytes) {
   return surface;
 }
 
+IOSurfaceRef create_surface_alias(void* base, size_t bytes) {
+  if (base == nullptr) {
+    throw std::runtime_error("[ane::memory] Cannot alias null array data");
+  }
+
+  auto alloc_size = std::max<size_t>(bytes, 1);
+  ScopedCFNumber width(alloc_size);
+  ScopedCFNumber height(1);
+  ScopedCFNumber bytes_per_row(alloc_size);
+  ScopedCFNumber bytes_per_elem(1);
+  ScopedCFNumber surface_size(alloc_size);
+  ScopedCFNumber address(reinterpret_cast<uintptr_t>(base));
+
+  auto props = CFDictionaryCreateMutable(
+      kCFAllocatorDefault,
+      0,
+      &kCFTypeDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  if (props == nullptr) {
+    throw std::runtime_error("[ane::memory] Failed to allocate IOSurface alias props");
+  }
+
+  CFDictionarySetValue(props, kIOSurfaceWidth, width.get());
+  CFDictionarySetValue(props, kIOSurfaceHeight, height.get());
+  CFDictionarySetValue(props, kIOSurfaceBytesPerRow, bytes_per_row.get());
+  CFDictionarySetValue(props, kIOSurfaceBytesPerElement, bytes_per_elem.get());
+  CFDictionarySetValue(props, kIOSurfaceAllocSize, surface_size.get());
+  CFDictionarySetValue(props, CFSTR("IOSurfaceAddress"), address.get());
+
+  auto surface = IOSurfaceCreate(props);
+  CFRelease(props);
+  if (surface == nullptr) {
+    throw std::runtime_error("[ane::memory] IOSurface alias creation failed");
+  }
+
+  IOSurfaceLock(surface, 0, nullptr);
+  void* alias_base = IOSurfaceGetBaseAddress(surface);
+  IOSurfaceUnlock(surface, 0, nullptr);
+  if (alias_base != base) {
+    CFRelease(surface);
+    throw std::runtime_error("[ane::memory] IOSurface alias base mismatch");
+  }
+  return surface;
+}
+
 size_t surface_size(IOSurfaceRef surface) {
   return static_cast<size_t>(IOSurfaceGetAllocSize(surface));
 }
@@ -124,40 +169,67 @@ std::shared_ptr<SurfaceBuffer> allocate_surface(size_t bytes) {
 }
 
 std::shared_ptr<SurfaceBuffer> wrap_array_to_surface(const array& arr) {
-  auto surface = allocate_surface(arr.nbytes());
+  if (!arr.flags().row_contiguous) {
+    throw std::runtime_error(
+        "[ane::memory] wrap_array_to_surface requires row-contiguous array");
+  }
+  if (arr.offset() != 0) {
+    throw std::runtime_error(
+        "[ane::memory] wrap_array_to_surface requires zero-offset array");
+  }
   if (arr.nbytes() == 0) {
-    return surface;
+    return allocate_surface(0);
   }
 
 #if defined(__APPLE__)
-  auto surface_ref = static_cast<IOSurfaceRef>(surface->handle());
-  IOSurfaceLock(surface_ref, 0, nullptr);
-  std::memcpy(
-      IOSurfaceGetBaseAddress(surface_ref),
-      const_cast<array&>(arr).data<char>(),
-      std::min(arr.nbytes(), surface->size()));
-  IOSurfaceUnlock(surface_ref, 0, nullptr);
+  void* base = const_cast<array&>(arr).data<char>();
+  auto surface = create_surface_alias(base, arr.nbytes());
+  return std::make_shared<SurfaceBuffer>(surface, surface_size(surface));
+#else
+  (void)arr;
+  throw std::runtime_error("[ane::memory] IOSurface is only available on Apple platforms");
 #endif
-  return surface;
 }
 
 void unwrap_surface_to_array(const SurfaceBuffer& surface, array& arr) {
   if (arr.nbytes() == 0 || surface.handle() == nullptr) {
     return;
   }
-
-  if (arr.buffer().ptr() == nullptr) {
-    arr.set_data(allocator::malloc(arr.nbytes()));
+  if (!arr.flags().row_contiguous) {
+    throw std::runtime_error(
+        "[ane::memory] unwrap_surface_to_array requires row-contiguous array");
+  }
+  if (arr.offset() != 0) {
+    throw std::runtime_error(
+        "[ane::memory] unwrap_surface_to_array requires zero-offset array");
+  }
+  if (surface.size() < arr.nbytes()) {
+    throw std::runtime_error(
+        "[ane::memory] unwrap_surface_to_array requires surface >= array bytes");
   }
 
 #if defined(__APPLE__)
   auto surface_ref = static_cast<IOSurfaceRef>(surface.handle());
-  IOSurfaceLock(surface_ref, kIOSurfaceLockReadOnly, nullptr);
-  std::memcpy(
-      arr.data<char>(),
-      IOSurfaceGetBaseAddress(surface_ref),
-      std::min(arr.nbytes(), surface.size()));
-  IOSurfaceUnlock(surface_ref, kIOSurfaceLockReadOnly, nullptr);
+  auto* base = IOSurfaceGetBaseAddress(surface_ref);
+  if (base == nullptr) {
+    throw std::runtime_error("[ane::memory] surface has null base address");
+  }
+  CFRetain(surface_ref);
+  auto wrapped = allocator::make_buffer(base, arr.nbytes());
+  if (wrapped.ptr() == nullptr) {
+    CFRelease(surface_ref);
+    throw std::runtime_error("[ane::memory] failed to wrap surface base into array");
+  }
+  arr.set_data(
+      wrapped,
+      [surface_ref](allocator::Buffer buffer) {
+        allocator::release(buffer);
+        CFRelease(surface_ref);
+      });
+#else
+  (void)surface;
+  (void)arr;
+  throw std::runtime_error("[ane::memory] IOSurface is only available on Apple platforms");
 #endif
 }
 

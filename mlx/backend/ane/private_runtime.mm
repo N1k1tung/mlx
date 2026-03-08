@@ -14,7 +14,7 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
-#include <cstring>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -109,7 +109,7 @@ inline bool profile_mode() {
 }
 
 inline bool metadata_fastpath_enabled() {
-  static bool enabled = env::get_var("MLX_ANE_METADATA_FASTPATH", 1) == 1;
+  static bool enabled = env::get_var("MLX_ANE_METADATA_FASTPATH", 0) == 1;
   return enabled;
 }
 
@@ -1116,6 +1116,53 @@ bool create_surface_handle(
   return true;
 }
 
+bool create_surface_alias_handle(
+    RuntimeState& state,
+    void* base,
+    size_t nbytes,
+    ANESurfaceAttachment::SurfaceHandle& handle,
+    std::string& reason) {
+  handle = {};
+  if (base == nullptr) {
+    reason = "input-data-null";
+    return false;
+  }
+  const size_t alloc_size = std::max<size_t>(nbytes, 1);
+  NSDictionary* props = @{
+    (id)kIOSurfaceWidth : @(alloc_size),
+    (id)kIOSurfaceHeight : @1,
+    (id)kIOSurfaceBytesPerElement : @1,
+    (id)kIOSurfaceBytesPerRow : @(alloc_size),
+    (id)kIOSurfaceAllocSize : @(alloc_size),
+    (id)kIOSurfacePixelFormat : @0,
+    (id)CFSTR("IOSurfaceAddress") : @((uintptr_t)base),
+  };
+  IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+  if (surface == nullptr) {
+    reason = "zero-copy-alias-create-failed";
+    return false;
+  }
+  IOSurfaceLock(surface, 0, nullptr);
+  void* alias_base = IOSurfaceGetBaseAddress(surface);
+  IOSurfaceUnlock(surface, 0, nullptr);
+  if (alias_base != base) {
+    CFRelease(surface);
+    reason = "zero-copy-alias-base-mismatch";
+    return false;
+  }
+  id wrapped = ((id(*)(Class, SEL, IOSurfaceRef))objc_msgSend)(
+      state.iosurface_cls, @selector(objectWithIOSurface:), surface);
+  if (wrapped == nil) {
+    CFRelease(surface);
+    reason = "zero-copy-alias-wrap-failed";
+    return false;
+  }
+  handle.surface = surface;
+  handle.wrapper = wrapped;
+  reason = "ok";
+  return true;
+}
+
 bool install_surface_handle_on_array(
     array& arr,
     ANESurfaceAttachment::SurfaceHandle* handle,
@@ -1152,14 +1199,32 @@ bool install_surface_handle_on_array(
   return true;
 }
 
+bool install_surface_attachment_metadata_only(
+    array& arr,
+    ANESurfaceAttachment::SurfaceHandle* handle,
+    size_t surface_nbytes) {
+  if (handle == nullptr || handle->surface == nullptr || handle->wrapper == nil) {
+    return false;
+  }
+  auto attachment = std::make_shared<ANESurfaceAttachment>();
+  attachment->handle = *handle;
+  attachment->nbytes = surface_nbytes;
+  arr.set_data_attachment(ane_surface_attachment_type_tag(), attachment);
+  handle->surface = nullptr;
+  handle->wrapper = nil;
+  return true;
+}
+
 bool ensure_input_surface_attachment(
     array& in,
     size_t required_nbytes,
-    uint64_t* copy_ns,
-    uint64_t* copy_bytes,
     std::string& reason) {
   if (!in.flags().row_contiguous) {
     reason = "input-not-row-contiguous";
+    return false;
+  }
+  if (in.offset() != 0) {
+    reason = "input-offset-nonzero";
     return false;
   }
 
@@ -1168,42 +1233,26 @@ bool ensure_input_surface_attachment(
     return true;
   }
 
+  if (in.nbytes() < required_nbytes) {
+    reason = "input-bytes-too-small-for-alias";
+    return false;
+  }
+
   auto* src = in.data<char>();
   if (src == nullptr) {
     reason = "input-data-null";
     return false;
   }
 
-  const size_t surface_nbytes = std::max(required_nbytes, in.nbytes());
+  const size_t surface_nbytes = required_nbytes;
   ANESurfaceAttachment::SurfaceHandle handle{};
   auto& s = runtime_state();
-  if (!create_surface_handle(s, surface_nbytes, handle)) {
-    reason = "input-surface-create-failed";
+  if (!create_surface_alias_handle(s, src, surface_nbytes, handle, reason)) {
     return false;
   }
-
-  IOSurfaceLock(handle.surface, 0, nullptr);
-  void* dst = IOSurfaceGetBaseAddress(handle.surface);
-  if (dst == nullptr) {
-    IOSurfaceUnlock(handle.surface, 0, nullptr);
+  if (!install_surface_attachment_metadata_only(in, &handle, surface_nbytes)) {
     release_surface_handle(handle);
-    reason = "input-surface-base-null";
-    return false;
-  }
-  const size_t copy_nbytes = std::min(in.nbytes(), surface_nbytes);
-  const uint64_t begin_ns = (copy_ns != nullptr) ? now_ns() : 0;
-  if (copy_nbytes > 0) {
-    std::memcpy(dst, src, copy_nbytes);
-  }
-  IOSurfaceUnlock(handle.surface, 0, nullptr);
-  if (copy_ns != nullptr && copy_bytes != nullptr) {
-    *copy_ns += now_ns() - begin_ns;
-    *copy_bytes += copy_nbytes;
-  }
-
-  if (!install_surface_handle_on_array(in, &handle, surface_nbytes, nullptr)) {
-    release_surface_handle(handle);
-    reason = "input-surface-attach-failed";
+    reason = "input-surface-alias-attach-failed";
     return false;
   }
 
@@ -1781,14 +1830,9 @@ bool dispatch(Program& program, array& arr, std::string* reason) {
     }
 
     std::string attach_reason;
-    uint64_t* copy_ns_ptr = profile_scope.enabled ? &profile_scope.input_copy_ns : nullptr;
-    uint64_t* copy_bytes_ptr =
-        profile_scope.enabled ? &profile_scope.input_copy_bytes : nullptr;
     if (!ensure_input_surface_attachment(
             in,
             program.input_nbytes[i],
-            copy_ns_ptr,
-            copy_bytes_ptr,
             attach_reason)) {
       if (reason) {
         *reason =
@@ -1982,7 +2026,7 @@ bool pin_to_surface(array& arr, std::string* reason) {
   }
 
   std::string attach_reason;
-  if (!ensure_input_surface_attachment(arr, arr.nbytes(), nullptr, nullptr, attach_reason)) {
+  if (!ensure_input_surface_attachment(arr, arr.nbytes(), attach_reason)) {
     if (reason) {
       *reason = "pin-failed:" + attach_reason;
     }
